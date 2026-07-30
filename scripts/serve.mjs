@@ -15,6 +15,14 @@ const types = {
 
 createServer((request, response) => {
   const pathname = decodeURIComponent(new URL(request.url, `http://${request.headers.host}`).pathname);
+  if (pathname === "/health") {
+    response.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    response.end("dayleaf-ok");
+    return;
+  }
   let relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   if (relative.startsWith("icons/") || relative === "manifest.webmanifest" || relative === "sw.js") {
     relative = join("public", relative);

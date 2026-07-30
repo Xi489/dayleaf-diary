@@ -22,6 +22,29 @@ npm run dev
 
 然后打开 <http://127.0.0.1:4173>。
 
+## macOS 桌面快捷应用
+
+双击项目根目录中的 `Install.command`，会自动：
+
+1. 生成带 Dayleaf 叶片图标的 `Dayleaf.app`
+2. 在桌面创建 `Dayleaf.app` 快捷方式
+3. 让你以后像打开普通软件一样双击启动日记
+
+首次打开时，macOS 可能询问是否允许启动脚本；这是因为快捷应用需要在本机启动 Dayleaf 服务并打开浏览器。应用只访问 `127.0.0.1`，日记数据仍只保存在浏览器本地。
+
+也可以手动执行：
+
+```bash
+./scripts/install_macos_shortcut.sh
+open Dayleaf.app
+```
+
+停止后台服务：
+
+```bash
+./scripts/stop_macos.sh
+```
+
 ## 检查与构建
 
 ```bash

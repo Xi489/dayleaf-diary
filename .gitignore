@@ -2,3 +2,6 @@
 dist/
 coverage/
 *.log
+tmp/
+assets/Dayleaf.iconset/
+Dayleaf.app/
