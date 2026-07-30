@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   calculateStreak,
   getWordCount,
+  groupEntriesByDate,
   normalizeTags,
   searchEntries,
 } from "../src/utils.js";
@@ -31,6 +32,36 @@ test("allows a streak ending yesterday", () => {
   assert.equal(calculateStreak(entries, new Date(2026, 6, 30)), 2);
 });
 
+test("counts multiple entries on one day as one streak day", () => {
+  const entries = [
+    { date: "2026-07-30" },
+    { date: "2026-07-30" },
+    { date: "2026-07-29" },
+  ];
+  assert.equal(calculateStreak(entries, new Date(2026, 6, 30)), 2);
+});
+
+test("groups multiple entries under the same calendar date", () => {
+  const grouped = groupEntriesByDate([
+    { id: "morning", date: "2026-07-30" },
+    { id: "evening", date: "2026-07-30" },
+    { id: "next-day", date: "2026-07-31" },
+  ]);
+  assert.deepEqual(grouped.get("2026-07-30").map((entry) => entry.id), ["morning", "evening"]);
+  assert.equal(grouped.get("2026-07-31").length, 1);
+});
+
+test("shows the most recently updated same-day entry first", () => {
+  const entries = [
+    { id: "earlier", date: "2026-07-31", updatedAt: "2026-07-31T08:00:00Z" },
+    { id: "later", date: "2026-07-31", updatedAt: "2026-07-31T20:00:00Z" },
+  ];
+  assert.deepEqual(
+    searchEntries(entries, "", "all", "2026-07-31").map((entry) => entry.id),
+    ["later", "earlier"],
+  );
+});
+
 test("searches title, body, mood, and tags", () => {
   const entries = [
     {
@@ -57,4 +88,8 @@ test("searches title, body, mood, and tags", () => {
   assert.equal(searchEntries(entries, "空气").length, 1);
   assert.equal(searchEntries(entries, "阅读").length, 1);
   assert.equal(searchEntries(entries, "", "favorite").length, 1);
+  assert.deepEqual(
+    searchEntries(entries, "", "all", "2026-07-30").map((entry) => entry.id),
+    ["1"],
+  );
 });

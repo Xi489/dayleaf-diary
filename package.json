@@ -1,9 +1,9 @@
 {
   "name": "dayleaf-diary",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "A calm, private, local-first diary that runs entirely in your browser.",
+  "description": "A calm, private, local-first diary for macOS and the web.",
   "scripts": {
     "dev": "node scripts/serve.mjs",
     "test": "node --test",

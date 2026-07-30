@@ -240,11 +240,29 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
           const title = document.querySelector("#entry-title");
           const content = document.querySelector("#entry-content");
           if (title && content) {
-            title.value = "原生窗口验收";
+            title.value = "原生窗口验收 1";
             title.dispatchEvent(new Event("input", { bubbles: true }));
-            content.value = "这是仅存在于无痕自检中的临时日记。";
+            content.value = "这是第一篇仅存在于无痕自检中的临时日记。";
             content.dispatchEvent(new Event("input", { bubbles: true }));
           }
+
+          document.querySelector("#new-entry-button")?.click();
+          if (title && content) {
+            title.value = "原生窗口验收 2";
+            title.dispatchEvent(new Event("input", { bubbles: true }));
+            content.value = "这是同一天的第二篇无痕临时日记。";
+            content.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          document.querySelector(".calendar-day.today")?.click();
+
+          const entryCount = document.querySelector("#entry-count")?.textContent;
+          const dateListCardCount = document.querySelectorAll(".entry-card").length;
+          const calendarCount = document.querySelector(".calendar-day.today .calendar-day-count")?.textContent;
+          const dateListTitle = document.querySelector("#list-title")?.textContent;
+          const clearDateFilter = document.querySelector("#clear-date-filter");
+          const clearDateFilterVisible = clearDateFilter && !clearDateFilter.hidden;
+          clearDateFilter?.click();
+          const allListTitle = document.querySelector("#list-title")?.textContent;
 
           return JSON.stringify({
             documentTitle: document.title,
@@ -252,7 +270,20 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             editorVisible: Boolean(document.querySelector("#entry-form:not([hidden])")),
             nativeMode: document.documentElement.classList.contains("native-app"),
             nativeSaveBridge: Boolean(window.webkit?.messageHandlers?.dayleafSaveFile),
-            storageAvailable
+            storageAvailable,
+            sameDayEntryCount: entryCount,
+            dateListCardCount,
+            calendarCount,
+            dateListTitle,
+            clearDateFilterVisible,
+            allListTitle,
+            multipleEntrySupport:
+              entryCount === "2" &&
+              dateListCardCount === 2 &&
+              calendarCount === "2" &&
+              dateListTitle?.endsWith("2篇") &&
+              clearDateFilterVisible &&
+              allListTitle === "所有日记"
           });
         })()
         """

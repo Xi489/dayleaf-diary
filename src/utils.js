@@ -31,6 +31,16 @@ export function formatEntryDate(dateKey) {
   }).format(date);
 }
 
+export function formatEntryTime(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 export function normalizeTags(value) {
   const source = Array.isArray(value) ? value : String(value || "").split(/[,，]/);
   return [...new Set(source.map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean))].slice(0, 8);
@@ -62,10 +72,20 @@ export function calculateStreak(entries, today = new Date()) {
   return streak;
 }
 
-export function searchEntries(entries, query, filter = "all") {
+export function groupEntriesByDate(entries) {
+  return entries.reduce((groups, entry) => {
+    const sameDay = groups.get(entry.date) || [];
+    sameDay.push(entry);
+    groups.set(entry.date, sameDay);
+    return groups;
+  }, new Map());
+}
+
+export function searchEntries(entries, query, filter = "all", date = null) {
   const term = query.trim().toLocaleLowerCase("zh-CN");
   return entries
     .filter((entry) => filter !== "favorite" || entry.favorite)
+    .filter((entry) => !date || entry.date === date)
     .filter((entry) => {
       if (!term) return true;
       return [entry.title, entry.content, ...(entry.tags || []), entry.mood]

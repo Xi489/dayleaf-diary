@@ -4,8 +4,9 @@ import {
   calculateStreak,
   escapeHtml,
   formatEntryDate,
+  formatEntryTime,
   getWordCount,
-  monthKey,
+  groupEntriesByDate,
   normalizeTags,
   parseDateKey,
   searchEntries,
@@ -38,6 +39,7 @@ const elements = {
   allCount: $("#all-count"),
   favoriteCount: $("#favorite-count"),
   sidebar: $("#sidebar"),
+  clearDateFilter: $("#clear-date-filter"),
   backupDialog: $("#backup-dialog"),
   deleteDialog: $("#delete-dialog"),
   importInput: $("#import-input"),
@@ -58,6 +60,7 @@ const state = {
   selectedId: null,
   query: "",
   filter: "all",
+  dateFilter: null,
   monthCursor: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   saveTimer: null,
 };
@@ -102,7 +105,8 @@ function renderCalendar() {
   const year = state.monthCursor.getFullYear();
   const month = state.monthCursor.getMonth();
   const selected = currentEntry();
-  const entriesByDate = new Map(journalStore.getAll().map((entry) => [entry.date, entry]));
+  const selectedDate = state.dateFilter || selected?.date;
+  const entriesByDate = groupEntriesByDate(journalStore.getAll());
   const firstDay = new Date(year, month, 1);
   const leading = (firstDay.getDay() + 6) % 7;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -120,15 +124,19 @@ function renderCalendar() {
       continue;
     }
     const dateKey = toDateKey(new Date(year, month, day));
-    const entry = entriesByDate.get(dateKey);
+    const entryCount = entriesByDate.get(dateKey)?.length || 0;
     const classes = [
       "calendar-day",
       dateKey === toDateKey() ? "today" : "",
-      entry ? "has-entry" : "",
-      selected?.date === dateKey ? "selected" : "",
+      entryCount ? "has-entry" : "",
+      entryCount > 1 ? "has-multiple" : "",
+      selectedDate === dateKey ? "selected" : "",
     ].filter(Boolean).join(" ");
+    const countBadge = entryCount > 1
+      ? `<span class="calendar-day-count" aria-hidden="true">${entryCount > 9 ? "9+" : entryCount}</span>`
+      : "";
     cells.push(
-      `<button class="${classes}" data-date="${dateKey}" aria-label="${dateKey}${entry ? "，有日记" : ""}">${day}</button>`,
+      `<button class="${classes}" data-date="${dateKey}" aria-label="${dateKey}${entryCount ? `，${entryCount}篇日记` : ""}"><span>${day}</span>${countBadge}</button>`,
     );
   }
   elements.calendarGrid.innerHTML = cells.join("");
@@ -136,13 +144,14 @@ function renderCalendar() {
 
 function entryCard(entry) {
   const preview = entry.content.trim().replace(/\s+/g, " ") || "还没有写下正文…";
+  const entryTime = formatEntryTime(entry.createdAt);
   const tags = (entry.tags || [])
     .slice(0, 2)
     .map((tag) => `<span>#${escapeHtml(tag)}</span>`)
     .join("");
   return `
     <button class="entry-card ${entry.id === state.selectedId ? "selected" : ""}" data-entry-id="${entry.id}">
-      <span class="entry-date">${escapeHtml(formatEntryDate(entry.date))}</span>
+      <span class="entry-date">${escapeHtml(formatEntryDate(entry.date))}${entryTime ? ` · ${escapeHtml(entryTime)}` : ""}</span>
       <span class="entry-card-top">
         <strong>${escapeHtml(entry.title || "无题日记")}</strong>
         <span class="entry-mood" aria-label="${escapeHtml(entry.mood || "未设置心情")}">${MOODS[entry.mood] || "·"}</span>
@@ -157,12 +166,24 @@ function entryCard(entry) {
 }
 
 function renderList() {
-  const entries = searchEntries(journalStore.getAll(), state.query, state.filter);
-  elements.listTitle.textContent = state.query
-    ? `“${state.query}”的结果`
-    : state.filter === "favorite"
-      ? "珍藏日记"
-      : "所有日记";
+  const entries = searchEntries(
+    journalStore.getAll(),
+    state.query,
+    state.filter,
+    state.dateFilter,
+  );
+  if (state.query) {
+    elements.listTitle.textContent = `“${state.query}”的结果`;
+  } else if (state.dateFilter) {
+    const dateLabel = new Intl.DateTimeFormat("zh-CN", {
+      month: "long",
+      day: "numeric",
+    }).format(parseDateKey(state.dateFilter));
+    elements.listTitle.textContent = `${dateLabel} · ${entries.length}篇`;
+  } else {
+    elements.listTitle.textContent = state.filter === "favorite" ? "珍藏日记" : "所有日记";
+  }
+  elements.clearDateFilter.hidden = !state.dateFilter;
   elements.entryList.innerHTML = entries.map(entryCard).join("");
   elements.emptyList.hidden = entries.length > 0;
   elements.entryList.hidden = entries.length === 0;
@@ -197,25 +218,52 @@ function selectEntry(id, { focus = false } = {}) {
   if (focus) requestAnimationFrame(() => elements.title.focus());
 }
 
-function createEntry(date = toDateKey()) {
+function syncFilterButtons() {
+  $$(".filter-item").forEach((item) => {
+    item.classList.toggle("active", item.dataset.filter === state.filter && !state.dateFilter);
+  });
+}
+
+function showDate(date, { createIfEmpty = false } = {}) {
   flushSave();
-  const sameDay = journalStore
-    .getAll()
-    .filter((entry) => entry.date === date)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-  if (sameDay) {
-    selectEntry(sameDay.id, { focus: true });
-    showToast("已经打开这一天的日记");
-    return;
-  }
-  const entry = journalStore.create({ date });
-  state.selectedId = entry.id;
+  state.dateFilter = date;
+  state.filter = "all";
   state.query = "";
   elements.search.value = "";
+  syncFilterButtons();
+
+  const entries = searchEntries(journalStore.getAll(), "", "all", date);
+  if (!entries.length && createIfEmpty) {
+    createEntry(date);
+    return;
+  }
+
+  state.selectedId = entries[0]?.id || null;
+  state.monthCursor = new Date(
+    parseDateKey(date).getFullYear(),
+    parseDateKey(date).getMonth(),
+    1,
+  );
+  render();
+  elements.sidebar.classList.remove("mobile-open");
+}
+
+function createEntry(date = toDateKey()) {
+  flushSave();
+  const entry = journalStore.create({ date });
+  const dayCount = journalStore.getAll().filter((item) => item.date === date).length;
+  state.selectedId = entry.id;
+  state.query = "";
+  state.filter = "all";
+  if (state.dateFilter !== date) {
+    state.dateFilter = null;
+  }
+  elements.search.value = "";
+  syncFilterButtons();
   state.monthCursor = new Date(parseDateKey(date).getFullYear(), parseDateKey(date).getMonth(), 1);
   render();
   requestAnimationFrame(() => elements.title.focus());
-  showToast("新日记已准备好");
+  showToast(dayCount > 1 ? `这一天的第 ${dayCount} 篇日记已准备好` : "新日记已准备好");
 }
 
 function collectFormData() {
@@ -227,12 +275,22 @@ function collectFormData() {
   };
 }
 
+function persistForm() {
+  const entry = currentEntry();
+  if (!entry) return null;
+  const updated = journalStore.update(entry.id, collectFormData());
+  if (updated && state.dateFilter === entry.date && updated.date !== entry.date) {
+    state.dateFilter = updated.date;
+  }
+  return updated;
+}
+
 function scheduleSave() {
   if (!state.selectedId) return;
   setSaveState("正在保存…", true);
   clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(() => {
-    journalStore.update(state.selectedId, collectFormData());
+    persistForm();
     state.saveTimer = null;
     setSaveState("已保存");
     renderStats();
@@ -244,7 +302,7 @@ function scheduleSave() {
 function flushSave() {
   if (!state.saveTimer || !state.selectedId) return;
   clearTimeout(state.saveTimer);
-  journalStore.update(state.selectedId, collectFormData());
+  persistForm();
   state.saveTimer = null;
   setSaveState("已保存");
 }
@@ -299,7 +357,7 @@ function exportMarkdown() {
   flushSave();
   const markdown = journalStore
     .getAll()
-    .sort((a, b) => b.date.localeCompare(a.date))
+    .sort((a, b) => b.date.localeCompare(a.date) || b.updatedAt.localeCompare(a.updatedAt))
     .map((entry) => {
       const tags = entry.tags.length ? `\n标签：${entry.tags.map((tag) => `#${tag}`).join(" ")}` : "";
       const mood = entry.mood ? `\n心情：${MOODS[entry.mood]} ${entry.mood}` : "";
@@ -318,6 +376,11 @@ async function importBackup(file) {
     }
     journalStore.replaceAll(payload.entries);
     state.selectedId = journalStore.getAll()[0]?.id || null;
+    state.dateFilter = null;
+    state.filter = "all";
+    state.query = "";
+    elements.search.value = "";
+    syncFilterButtons();
     render();
     elements.backupDialog.close();
     showToast(`已恢复 ${payload.entries.length} 篇日记`);
@@ -354,6 +417,11 @@ function importNativeBackup(backupText) {
     : null;
 
   state.selectedId = importedLatest?.id || allEntries[0]?.id || null;
+  state.dateFilter = null;
+  state.filter = "all";
+  state.query = "";
+  elements.search.value = "";
+  syncFilterButtons();
   render();
 
   return JSON.stringify({
@@ -402,12 +470,15 @@ function initializeTheme() {
 
 function bindEvents() {
   $("#new-entry-button").addEventListener("click", () => createEntry());
-  $("#empty-new-button").addEventListener("click", () => createEntry());
+  $("#empty-new-button").addEventListener("click", () => createEntry(state.dateFilter || toDateKey()));
   $("#brand-button").addEventListener("click", () => {
-    state.monthCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-    const today = journalStore.getAll().find((entry) => entry.date === toDateKey());
-    if (today) selectEntry(today.id);
-    else renderCalendar();
+    showDate(toDateKey());
+  });
+  elements.clearDateFilter.addEventListener("click", () => {
+    state.dateFilter = null;
+    syncFilterButtons();
+    renderCalendar();
+    renderList();
   });
   $("#previous-month").addEventListener("click", () => moveMonth(-1));
   $("#next-month").addEventListener("click", () => moveMonth(1));
@@ -419,7 +490,10 @@ function bindEvents() {
   });
 
   elements.search.addEventListener("input", (event) => {
+    state.dateFilter = null;
     state.query = event.target.value;
+    syncFilterButtons();
+    renderCalendar();
     renderList();
   });
 
@@ -431,15 +505,15 @@ function bindEvents() {
   elements.calendarGrid.addEventListener("click", (event) => {
     const button = event.target.closest("[data-date]");
     if (!button) return;
-    const entry = journalStore.getAll().find((item) => item.date === button.dataset.date);
-    if (entry) selectEntry(entry.id);
-    else createEntry(button.dataset.date);
+    showDate(button.dataset.date, { createIfEmpty: true });
   });
 
   $$(".filter-item").forEach((button) => {
     button.addEventListener("click", () => {
       state.filter = button.dataset.filter;
-      $$(".filter-item").forEach((item) => item.classList.toggle("active", item === button));
+      state.dateFilter = null;
+      syncFilterButtons();
+      renderCalendar();
       renderList();
     });
   });
@@ -471,10 +545,16 @@ function bindEvents() {
 
   $("#delete-button").addEventListener("click", () => elements.deleteDialog.showModal());
   $("#confirm-delete-button").addEventListener("click", () => {
+    flushSave();
     const id = state.selectedId;
     if (!id) return;
     journalStore.delete(id);
-    state.selectedId = null;
+    state.selectedId = searchEntries(
+      journalStore.getAll(),
+      state.query,
+      state.filter,
+      state.dateFilter,
+    )[0]?.id || null;
     render();
     showToast("日记已删除");
   });
@@ -504,6 +584,9 @@ function bindEvents() {
     if (modifier && event.key.toLowerCase() === "s") {
       event.preventDefault();
       flushSave();
+      renderStats();
+      renderCalendar();
+      renderList();
       showToast("日记已保存");
     }
   });
@@ -516,8 +599,8 @@ function initialize() {
   $("#daily-prompt").textContent = prompts[new Date().getDay()];
   bindEvents();
   const entries = journalStore.getAll();
-  const today = entries.find((entry) => entry.date === toDateKey());
-  state.selectedId = today?.id || entries.sort((a, b) => b.date.localeCompare(a.date))[0]?.id || null;
+  const today = searchEntries(entries, "", "all", toDateKey())[0];
+  state.selectedId = today?.id || searchEntries(entries, "")[0]?.id || null;
   render();
 
   const isNativeApp = document.documentElement.classList.contains("native-app");

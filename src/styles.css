@@ -349,7 +349,7 @@ kbd {
   font-weight: 700;
 }
 
-.calendar-day.has-entry::after {
+.calendar-day.has-entry:not(.has-multiple)::after {
   background: var(--warm);
   border-radius: 50%;
   bottom: 2px;
@@ -361,6 +361,25 @@ kbd {
   width: 3px;
 }
 
+.calendar-day-count {
+  align-items: center;
+  background: var(--warm);
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  color: #fff;
+  display: flex;
+  font-size: 7px;
+  font-weight: 700;
+  height: 14px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 14px;
+  padding: 0 2px;
+  position: absolute;
+  right: -4px;
+  top: -3px;
+}
+
 .calendar-day.selected {
   background: var(--accent);
   color: #fff;
@@ -369,6 +388,12 @@ kbd {
 
 .calendar-day.selected::after {
   background: #fff;
+}
+
+.calendar-day.selected .calendar-day-count {
+  background: var(--surface-raised);
+  border-color: var(--accent);
+  color: var(--accent-strong);
 }
 
 .insight-card {
@@ -525,6 +550,26 @@ kbd {
   font-family: var(--serif);
   font-size: 23px;
   margin: 6px 0 0;
+}
+
+.list-header-actions {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.date-filter-clear {
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 999px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 7px 10px;
+}
+
+.date-filter-clear:hover {
+  background: color-mix(in srgb, var(--accent-soft) 74%, var(--surface-raised));
 }
 
 .mobile-menu {
