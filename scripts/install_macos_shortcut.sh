@@ -12,7 +12,7 @@ DESKTOP_DIR="${HOME}/Desktop"
 DESKTOP_SHORTCUT="${DESKTOP_DIR}/Dayleaf.app"
 
 chmod +x "${APP_DIR}/scripts/"*.sh
-"${APP_DIR}/scripts/build_macos_launcher.sh"
+"${APP_DIR}/scripts/build_native_macos.sh"
 
 mkdir -p "${DESKTOP_DIR}"
 if [ -L "${DESKTOP_SHORTCUT}" ]; then
@@ -27,6 +27,6 @@ else
 fi
 
 echo
-echo "Dayleaf is ready."
+echo "Native Dayleaf is ready."
 echo "App: ${APP_PATH}"
 echo "Desktop shortcut: ${DESKTOP_SHORTCUT}"

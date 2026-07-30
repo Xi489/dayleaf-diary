@@ -264,6 +264,12 @@ function moveMonth(amount) {
 }
 
 function downloadFile(name, content, type) {
+  const nativeSaver = window.webkit?.messageHandlers?.dayleafSaveFile;
+  if (nativeSaver) {
+    nativeSaver.postMessage({ name, content, type });
+    return;
+  }
+
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -320,6 +326,65 @@ async function importBackup(file) {
   } finally {
     elements.importInput.value = "";
   }
+}
+
+function importNativeBackup(backupText) {
+  const payload = JSON.parse(backupText);
+  if (payload.app !== "Dayleaf" || !Array.isArray(payload.entries)) {
+    throw new Error("invalid backup");
+  }
+
+  const allById = new Map(journalStore.getAll().map((entry) => [entry.id, entry]));
+  for (const incomingEntry of payload.entries) {
+    const existingEntry = allById.get(incomingEntry.id);
+    const existingUpdatedAt = Date.parse(existingEntry?.updatedAt || "") || 0;
+    const incomingUpdatedAt = Date.parse(incomingEntry.updatedAt || "") || 0;
+    if (!existingEntry || incomingUpdatedAt >= existingUpdatedAt) {
+      allById.set(incomingEntry.id, incomingEntry);
+    }
+  }
+
+  journalStore.replaceAll([...allById.values()]);
+  const allEntries = journalStore.getAll();
+  const latestIncoming = [...payload.entries].sort((a, b) =>
+    String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")),
+  )[0];
+  const importedLatest = latestIncoming
+    ? allEntries.find((entry) => entry.id === String(latestIncoming.id))
+    : null;
+
+  state.selectedId = importedLatest?.id || allEntries[0]?.id || null;
+  render();
+
+  return JSON.stringify({
+    importedCount: payload.entries.length,
+    totalCount: allEntries.length,
+    latestEntryMatches:
+      !latestIncoming ||
+      (importedLatest?.title === String(latestIncoming.title || "").slice(0, 100) &&
+        importedLatest?.content === String(latestIncoming.content || "")),
+  });
+}
+
+function verifyNativeBackup(backupText) {
+  const payload = JSON.parse(backupText);
+  if (payload.app !== "Dayleaf" || !Array.isArray(payload.entries)) {
+    throw new Error("invalid backup");
+  }
+
+  const allEntries = journalStore.getAll();
+  return JSON.stringify({
+    expectedCount: payload.entries.length,
+    totalCount: allEntries.length,
+    allEntriesMatch: payload.entries.every((incomingEntry) => {
+      const storedEntry = allEntries.find((entry) => entry.id === String(incomingEntry.id));
+      return (
+        storedEntry?.date === incomingEntry.date &&
+        storedEntry?.title === String(incomingEntry.title || "").slice(0, 100) &&
+        storedEntry?.content === String(incomingEntry.content || "")
+      );
+    }),
+  });
 }
 
 function setTheme(theme) {
@@ -455,7 +520,8 @@ function initialize() {
   state.selectedId = today?.id || entries.sort((a, b) => b.date.localeCompare(a.date))[0]?.id || null;
   render();
 
-  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  const isNativeApp = document.documentElement.classList.contains("native-app");
+  if (!isNativeApp && "serviceWorker" in navigator && location.protocol !== "file:") {
     const isLocalDevelopment = ["localhost", "127.0.0.1"].includes(location.hostname);
     window.addEventListener("load", () => {
       if (isLocalDevelopment) {
@@ -469,4 +535,7 @@ function initialize() {
   }
 }
 
+window.dayleafNativePrepareToClose = flushSave;
+window.dayleafNativeImportBackup = importNativeBackup;
+window.dayleafNativeVerifyBackup = verifyNativeBackup;
 initialize();
