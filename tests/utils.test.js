@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   calculateStreak,
+  contentToText,
   getWordCount,
   groupEntriesByDate,
   normalizeTags,
@@ -15,6 +16,34 @@ test("normalizes and deduplicates tags", () => {
 test("counts CJK characters and latin words", () => {
   assert.equal(getWordCount("今天 feel so good"), 5);
   assert.equal(getWordCount(""), 0);
+});
+
+test("converts rich diary content to searchable plain text", () => {
+  const content = [
+    '<p>雨后&nbsp;散步<br>空气很好 &amp; 清新</p>',
+    '<p><img class="inline-sticker" src="data:image/png;base64,test" alt="开心 &quot;贴纸&quot;"> 出发</p>',
+    '<figure><img class="diary-image" src="data:image/png;base64,test" alt="湖边照片"><figcaption>傍晚</figcaption></figure>',
+  ].join("");
+
+  assert.equal(contentToText(content, "html"), '雨后 散步\n空气很好 & 清新\n开心 "贴纸" 出发\n湖边照片 傍晚');
+  assert.equal(contentToText("原样保留 &amp; <标签>", "text"), "原样保留 &amp; <标签>");
+});
+
+test("decodes numeric entities and ignores non-content HTML", () => {
+  assert.equal(
+    contentToText('<p>&#20170;&#x5929;</p><script>不应搜索</script><style>.hidden{}</style>', "html"),
+    "今天",
+  );
+});
+
+test("omits media attribution captions from diary previews and word counts", () => {
+  assert.equal(
+    contentToText(
+      '<p>散步</p><img src="data:image/png;base64,AA==" alt="图片：树林"><span class="media-credit">Openverse · Example Creator</span>',
+      "html",
+    ),
+    "散步\n图片：树林",
+  );
 });
 
 test("calculates a streak ending today", () => {
@@ -92,4 +121,24 @@ test("searches title, body, mood, and tags", () => {
     searchEntries(entries, "", "all", "2026-07-30").map((entry) => entry.id),
     ["1"],
   );
+});
+
+test("searches visible rich text and image descriptions instead of markup", () => {
+  const entries = [
+    {
+      id: "rich",
+      date: "2026-07-31",
+      updatedAt: "2026-07-31T10:00:00Z",
+      title: "",
+      content: '<p>今天很开心</p><img class="inline-sticker" alt="猫咪挥手" src="data:image/png;base64,abc">',
+      contentFormat: "html",
+      mood: "",
+      tags: [],
+      favorite: false,
+    },
+  ];
+
+  assert.equal(searchEntries(entries, "猫咪挥手").length, 1);
+  assert.equal(searchEntries(entries, "今天很开心").length, 1);
+  assert.equal(searchEntries(entries, "inline-sticker").length, 0);
 });

@@ -81,6 +81,56 @@ export function groupEntriesByDate(entries) {
   }, new Map());
 }
 
+const HTML_ENTITIES = {
+  amp: "&",
+  apos: "'",
+  gt: ">",
+  lt: "<",
+  nbsp: "\u00a0",
+  quot: '"',
+};
+
+function decodeHtmlEntities(value) {
+  return String(value).replace(/&(#(?:x[\da-f]+|\d+)|[a-z][\da-z]+);/gi, (entity, code) => {
+    if (code[0] !== "#") return HTML_ENTITIES[code.toLowerCase()] ?? entity;
+
+    const hexadecimal = code[1]?.toLowerCase() === "x";
+    const point = Number.parseInt(code.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+    if (!Number.isInteger(point) || point < 0 || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) {
+      return entity;
+    }
+    return String.fromCodePoint(point);
+  });
+}
+
+function imageAltText(tag) {
+  const match = tag.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i);
+  const alt = decodeHtmlEntities(match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
+  return alt ? ` ${alt} ` : " ";
+}
+
+export function contentToText(content, format = "text") {
+  const source = String(content ?? "");
+  if (format !== "html") return source;
+
+  const text = source
+    .replace(/<!--[^]*?-->/g, "")
+    .replace(/<(script|style|template)\b(?:[^>"']|"[^"]*"|'[^']*')*>[^]*?<\/\1\s*>/gi, "")
+    .replace(/<span\b[^>]*class\s*=\s*(?:"[^"]*\bmedia-credit\b[^"]*"|'[^']*\bmedia-credit\b[^']*')[^>]*>[^]*?<\/span\s*>/gi, "")
+    .replace(/<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, imageAltText)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/\s*(?:address|article|aside|blockquote|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|section|tr|ul)\s*>/gi, "\n")
+    .replace(/<\/\s*(?:td|th)\s*>/gi, "\t")
+    .replace(/<[^>]*>/g, "");
+
+  return decodeHtmlEntities(text)
+    .replace(/\u00a0/g, " ")
+    .replace(/[\t \f\v]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function searchEntries(entries, query, filter = "all", date = null) {
   const term = query.trim().toLocaleLowerCase("zh-CN");
   return entries
@@ -88,7 +138,7 @@ export function searchEntries(entries, query, filter = "all", date = null) {
     .filter((entry) => !date || entry.date === date)
     .filter((entry) => {
       if (!term) return true;
-      return [entry.title, entry.content, ...(entry.tags || []), entry.mood]
+      return [entry.title, contentToText(entry.content, entry.contentFormat), ...(entry.tags || []), entry.mood]
         .join(" ")
         .toLocaleLowerCase("zh-CN")
         .includes(term);

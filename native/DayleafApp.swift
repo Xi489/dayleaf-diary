@@ -95,7 +95,11 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return true
         }
 
-        flushJournal {
+        flushJournal { didSave in
+            guard didSave else {
+                self.showUnsavedChangesAlert()
+                return
+            }
             self.closeIsAllowed = true
             sender.performClose(nil)
         }
@@ -108,8 +112,14 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         terminationRequested = true
-        flushJournal {
-            sender.reply(toApplicationShouldTerminate: true)
+        flushJournal { didSave in
+            if !didSave {
+                self.terminationRequested = false
+            }
+            sender.reply(toApplicationShouldTerminate: didSave)
+            if !didSave {
+                self.showUnsavedChangesAlert()
+            }
         }
         return .terminateLater
     }
@@ -118,27 +128,43 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         true
     }
 
-    private func flushJournal(completion: @escaping () -> Void) {
+    private func showUnsavedChangesAlert() {
+        guard let window, !isSmokeTest else {
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "这篇日记还没有保存"
+        alert.informativeText = "本机存储空间不足。请继续编辑，删除一张图片或表情包后再关闭 Dayleaf。"
+        alert.addButton(withTitle: "继续编辑")
+        alert.beginSheetModal(for: window)
+    }
+
+    private func flushJournal(completion: @escaping (Bool) -> Void) {
         guard let webView else {
-            completion()
+            completion(true)
             return
         }
 
         var didFinish = false
-        func finishOnce() {
+        func finishOnce(_ didSave: Bool) {
             guard !didFinish else {
                 return
             }
             didFinish = true
-            completion()
+            completion(didSave)
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-            finishOnce()
+            finishOnce(false)
         }
-        webView.evaluateJavaScript("window.dayleafNativePrepareToClose?.()") { _, _ in
+        webView.evaluateJavaScript("window.dayleafNativePrepareToClose?.()") { result, error in
             DispatchQueue.main.async {
-                finishOnce()
+                guard error == nil else {
+                    finishOnce(false)
+                    return
+                }
+                finishOnce((result as? Bool) ?? true)
             }
         }
     }
@@ -155,7 +181,7 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
+        panel.allowedContentTypes = [.json, .image]
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.canChooseDirectories = parameters.allowsDirectories
         panel.canChooseFiles = true
@@ -242,7 +268,7 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
           if (title && content) {
             title.value = "原生窗口验收 1";
             title.dispatchEvent(new Event("input", { bubbles: true }));
-            content.value = "这是第一篇仅存在于无痕自检中的临时日记。";
+            content.textContent = "这是第一篇仅存在于无痕自检中的临时日记。";
             content.dispatchEvent(new Event("input", { bubbles: true }));
           }
 
@@ -250,9 +276,60 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
           if (title && content) {
             title.value = "原生窗口验收 2";
             title.dispatchEvent(new Event("input", { bubbles: true }));
-            content.value = "这是同一天的第二篇无痕临时日记。";
+            content.textContent = "这是同一天的第二篇无痕临时日记。";
             content.dispatchEvent(new Event("input", { bubbles: true }));
+
+            const textNode = content.firstChild;
+            if (textNode) {
+              const range = document.createRange();
+              range.setStart(textNode, 2);
+              range.collapse(true);
+              const selection = window.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(range);
+              content.focus();
+              document.querySelector("#sticker-button")?.click();
+              document.querySelector('[data-emoji="😊"]')?.click();
+            }
+
+            window.dayleafTesting?.insertMediaDataUrl(
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+              "image",
+              { alt: "图片：原生自检" }
+            );
           }
+          window.dayleafNativePrepareToClose?.();
+
+          content?.append(document.createTextNode(" 保存失败复验"));
+          content?.dispatchEvent(new Event("input", { bubbles: true }));
+          window.dayleafTesting?.failNextSave();
+          const saveFailureBlocked = window.dayleafNativePrepareToClose?.() === false;
+          const saveFailureVisible = document.querySelector("#save-status")?.textContent === "保存失败";
+          const retrySaveSucceeded = window.dayleafNativePrepareToClose?.() === true;
+
+          let richEntry = null;
+          try {
+            richEntry = JSON.parse(localStorage.getItem("dayleaf.entries.v1") || "[]")
+              .find((entry) => entry.title === "原生窗口验收 2");
+          } catch {}
+          const caretEmojiInserted = Boolean(
+            richEntry?.content?.includes("这是😊") &&
+            richEntry?.content?.includes("同一天")
+          );
+          const imageInserted = richEntry?.content?.includes('class="diary-image"') || false;
+          const richContentSupport =
+            richEntry?.contentFormat === "html" && caretEmojiInserted && imageInserted;
+          const sanitizedSample = window.dayleafTesting?.sanitizeRichContent(
+            '<script>window.bad = true</script>' +
+            '<img src="https://tracker.example/pixel.png" onerror="window.bad = true" alt="远程图">' +
+            '<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" onerror="window.bad = true" data-media-kind="sticker">'
+          ) || "";
+          const richSanitizerWorks =
+            !sanitizedSample.includes("script") &&
+            !sanitizedSample.includes("onerror") &&
+            !sanitizedSample.includes("tracker.example") &&
+            sanitizedSample.includes("inline-sticker");
+
           document.querySelector(".calendar-day.today")?.click();
 
           const entryCount = document.querySelector("#entry-count")?.textContent;
@@ -263,6 +340,10 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
           const clearDateFilterVisible = clearDateFilter && !clearDateFilter.hidden;
           clearDateFilter?.click();
           const allListTitle = document.querySelector("#list-title")?.textContent;
+          document.querySelector("#sticker-button")?.click();
+          const mediaDialogOpened = Boolean(document.querySelector("#media-dialog")?.open);
+          document.querySelector("#image-tab")?.click();
+          const imagePanelVisible = document.querySelector("#image-panel")?.hidden === false;
 
           return JSON.stringify({
             documentTitle: document.title,
@@ -277,6 +358,15 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             dateListTitle,
             clearDateFilterVisible,
             allListTitle,
+            caretEmojiInserted,
+            imageInserted,
+            richContentSupport,
+            richSanitizerWorks,
+            saveFailureBlocked,
+            saveFailureVisible,
+            retrySaveSucceeded,
+            mediaDialogOpened,
+            imagePanelVisible,
             multipleEntrySupport:
               entryCount === "2" &&
               dateListCardCount === 2 &&

@@ -14,6 +14,7 @@ function sanitizeEntry(entry) {
     date: /^\d{4}-\d{2}-\d{2}$/.test(entry.date) ? entry.date : toDateKey(),
     title: String(entry.title || "").slice(0, 100),
     content: String(entry.content || ""),
+    contentFormat: entry.contentFormat === "html" ? "html" : "text",
     mood: String(entry.mood || ""),
     tags: normalizeTags(entry.tags),
     favorite: Boolean(entry.favorite),
@@ -50,6 +51,17 @@ class JournalStore {
     this.storage.setItem(STORAGE_KEY, JSON.stringify(this.entries));
   }
 
+  commitEntries(nextEntries) {
+    const previousEntries = this.entries;
+    this.entries = nextEntries;
+    try {
+      this.persist();
+    } catch (error) {
+      this.entries = previousEntries;
+      throw error;
+    }
+  }
+
   getAll() {
     return [...this.entries];
   }
@@ -60,8 +72,7 @@ class JournalStore {
 
   create(initial = {}) {
     const entry = sanitizeEntry(initial);
-    this.entries.push(entry);
-    this.persist();
+    this.commitEntries([...this.entries, entry]);
     return entry;
   }
 
@@ -76,25 +87,53 @@ class JournalStore {
       createdAt: current.createdAt,
       updatedAt: new Date().toISOString(),
     });
-    this.entries[index] = next;
-    this.persist();
+    const nextEntries = [...this.entries];
+    nextEntries[index] = next;
+    this.commitEntries(nextEntries);
     return next;
   }
 
   delete(id) {
-    const previousLength = this.entries.length;
-    this.entries = this.entries.filter((entry) => entry.id !== id);
-    if (this.entries.length !== previousLength) this.persist();
+    const nextEntries = this.entries.filter((entry) => entry.id !== id);
+    if (nextEntries.length !== this.entries.length) this.commitEntries(nextEntries);
   }
 
   replaceAll(entries) {
-    this.entries = entries.map(sanitizeEntry);
-    this.persist();
+    this.commitEntries(entries.map(sanitizeEntry));
+  }
+
+  replaceAllWithPreferences(entries, preferenceUpdates = {}) {
+    const previousEntries = this.entries;
+    const previousPreferences = this.preferences;
+    const nextEntries = entries.map(sanitizeEntry);
+    const nextPreferences = { ...this.preferences, ...preferenceUpdates };
+
+    try {
+      this.storage.setItem(STORAGE_KEY, JSON.stringify(nextEntries));
+      this.storage.setItem(PREFERENCES_KEY, JSON.stringify(nextPreferences));
+    } catch (error) {
+      try {
+        this.storage.setItem(STORAGE_KEY, JSON.stringify(previousEntries));
+      } catch {}
+      try {
+        this.storage.setItem(PREFERENCES_KEY, JSON.stringify(previousPreferences));
+      } catch {}
+      throw error;
+    }
+
+    this.entries = nextEntries;
+    this.preferences = nextPreferences;
   }
 
   setPreference(key, value) {
-    this.preferences[key] = value;
-    this.storage.setItem(PREFERENCES_KEY, JSON.stringify(this.preferences));
+    const previousPreferences = this.preferences;
+    this.preferences = { ...this.preferences, [key]: value };
+    try {
+      this.storage.setItem(PREFERENCES_KEY, JSON.stringify(this.preferences));
+    } catch (error) {
+      this.preferences = previousPreferences;
+      throw error;
+    }
   }
 
   getPreference(key, fallback = null) {

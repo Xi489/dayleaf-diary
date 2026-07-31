@@ -180,7 +180,28 @@
                   </div>
                 </div>
                 <input id="entry-title" class="title-input" type="text" placeholder="给今天一个标题…" maxlength="100" />
-                <textarea id="entry-content" class="content-input" placeholder="今天发生了什么？&#10;&#10;不必写得完整，只要真实就好。"></textarea>
+                <div class="composer-tools" aria-label="插入素材">
+                  <div class="composer-tool-group">
+                    <button class="composer-tool" id="sticker-button" type="button" aria-label="插入表情或表情包">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 10h.01M15.5 10h.01M8.5 14.2c1 1.2 2.2 1.8 3.5 1.8s2.5-.6 3.5-1.8"/></svg>
+                      表情
+                    </button>
+                    <button class="composer-tool" id="image-button" type="button" aria-label="插入图片">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 4.8-4.8 3.3 3.3 2.2-2.2L20 19"/></svg>
+                      图片
+                    </button>
+                  </div>
+                  <span>会插入到当前光标位置</span>
+                </div>
+                <div
+                  id="entry-content"
+                  class="content-input"
+                  contenteditable="true"
+                  role="textbox"
+                  aria-multiline="true"
+                  data-placeholder="今天发生了什么？&#10;&#10;不必写得完整，只要真实就好。"
+                  spellcheck="true"
+                ></div>
                 <div class="editor-footer">
                   <label class="tag-field">
                     <svg viewBox="0 0 24 24"><path d="M20 13 13 20l-9-9V4h7l9 9Z"/><circle cx="8.5" cy="8.5" r="1"/></svg>
@@ -206,7 +227,7 @@
             <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
           </button>
         </div>
-        <p class="dialog-copy">日记只存储在这个浏览器中。建议定期导出备份，换设备时也能轻松带走。</p>
+        <p class="dialog-copy">日记只存储在这台设备。完整备份会一并保留图片和个人表情包，建议定期导出。</p>
         <div class="backup-options">
           <button class="backup-option" id="export-json-button" type="button">
             <span class="option-icon">↓</span>
@@ -223,6 +244,107 @@
           <input id="import-input" type="file" accept="application/json,.json" hidden />
         </div>
       </form>
+    </dialog>
+
+    <dialog id="media-dialog" class="dialog media-dialog">
+      <div class="media-dialog-content">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">丰富记录</span>
+            <h2 id="media-dialog-title">插入表情</h2>
+          </div>
+          <button class="icon-button" id="media-close-button" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+
+        <div class="media-tabs" role="tablist" aria-label="素材类型">
+          <button id="sticker-tab" type="button" role="tab" aria-controls="sticker-panel" aria-selected="true">表情与表情包</button>
+          <button id="image-tab" type="button" role="tab" aria-controls="image-panel" aria-selected="false">图片</button>
+        </div>
+
+        <section id="sticker-panel" class="media-panel" role="tabpanel" aria-labelledby="sticker-tab">
+          <div class="media-section-heading">
+            <div>
+              <h3>常用表情</h3>
+              <p>点一下即可插入到句子中。</p>
+            </div>
+            <label class="compact-search">
+              <span class="sr-only">搜索表情</span>
+              <input id="emoji-search-input" type="search" placeholder="搜索表情" autocomplete="off" />
+            </label>
+          </div>
+          <div id="emoji-grid" class="emoji-grid" aria-label="常用表情"></div>
+
+          <div class="media-section-heading with-action">
+            <div>
+              <h3>我的表情包</h3>
+              <p>上传后会压缩并保存在这台设备。</p>
+            </div>
+            <label class="secondary-button media-upload-button" for="sticker-upload-input">+上传表情包</label>
+            <input id="sticker-upload-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+          </div>
+          <div id="custom-sticker-grid" class="custom-sticker-grid"></div>
+          <p id="custom-sticker-empty" class="media-empty">还没有个人表情包。</p>
+
+          <div class="online-search-section">
+            <div class="media-section-heading">
+              <div>
+                <h3>在线找表情包</h3>
+                <p>搜索 Openverse 中免署名的 CC0 / 公共领域图片。</p>
+              </div>
+            </div>
+            <div class="online-search-row">
+              <input id="sticker-online-query" type="search" placeholder="例如：开心猫咪" autocomplete="off" />
+              <button class="primary-button" id="sticker-online-search" type="button">搜索</button>
+            </div>
+            <p id="sticker-online-status" class="online-status" aria-live="polite"></p>
+            <div id="sticker-online-results" class="online-results"></div>
+          </div>
+        </section>
+
+        <section id="image-panel" class="media-panel" role="tabpanel" aria-labelledby="image-tab" hidden>
+          <label class="image-upload-card" for="image-upload-input">
+            <span class="image-upload-icon" aria-hidden="true">↑</span>
+            <strong>从电脑选择图片</strong>
+            <small>支持 PNG、JPG、WebP 和 GIF；也可直接粘贴图片</small>
+          </label>
+          <input id="image-upload-input" type="file" accept="image/*" multiple hidden />
+
+          <div class="url-insert-section">
+            <div class="media-section-heading">
+              <div>
+                <h3>从图片网址插入</h3>
+                <p>图片会下载后保存，断网也能查看。</p>
+              </div>
+            </div>
+            <div class="online-search-row">
+              <input id="image-url-input" type="url" placeholder="https://example.com/photo.jpg" autocomplete="off" />
+              <button class="secondary-button" id="image-url-insert" type="button">插入</button>
+            </div>
+          </div>
+
+          <div class="online-search-section">
+            <div class="media-section-heading">
+              <div>
+                <h3>在线找图片</h3>
+                <p>搜索 Openverse 中的开放授权素材。</p>
+              </div>
+            </div>
+            <div class="online-search-row">
+              <input id="image-online-query" type="search" placeholder="例如：夏日森林" autocomplete="off" />
+              <button class="primary-button" id="image-online-search" type="button">搜索</button>
+            </div>
+            <p id="image-online-status" class="online-status" aria-live="polite"></p>
+            <div id="image-online-results" class="online-results"></div>
+          </div>
+        </section>
+
+        <p class="media-privacy-note">
+          本地图片仅保存在 Dayleaf 中。使用在线搜索时，只会将搜索词发送给 Openverse。
+          搜索由 Openverse API 提供，Dayleaf 未获 Openverse 认可或认证；公开分享前请核对素材许可证。
+        </p>
+      </div>
     </dialog>
 
     <dialog id="delete-dialog" class="dialog small-dialog">
