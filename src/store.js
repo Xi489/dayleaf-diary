@@ -41,7 +41,10 @@ class JournalStore {
 
   readPreferences() {
     try {
-      return JSON.parse(this.storage.getItem(PREFERENCES_KEY) || "{}");
+      const preferences = JSON.parse(this.storage.getItem(PREFERENCES_KEY) || "{}");
+      return preferences && typeof preferences === "object" && !Array.isArray(preferences)
+        ? preferences
+        : {};
     } catch {
       return {};
     }

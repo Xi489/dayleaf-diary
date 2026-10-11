@@ -89,6 +89,17 @@ test("rolls back preferences when persistence fails", () => {
   assert.equal(store.getPreference("missing", "fallback"), "fallback");
 });
 
+test("recovers from malformed preference container values", () => {
+  for (const value of ["null", "[]", '"invalid"', "42"]) {
+    const storage = new MemoryStorage();
+    storage.values.set("dayleaf.preferences.v1", value);
+    const store = new JournalStore(storage);
+    assert.equal(store.getPreference("theme", "fallback"), "fallback");
+    assert.doesNotThrow(() => store.setPreference("theme", "light"));
+    assert.equal(store.getPreference("theme"), "light");
+  }
+});
+
 test("restores entries and preferences atomically when a backup write fails", () => {
   const storage = new MemoryStorage();
   const store = new JournalStore(storage);

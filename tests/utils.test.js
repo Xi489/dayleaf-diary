@@ -1,12 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  SPLASH_FADE_MS,
+  SPLASH_MESSAGES,
+  SPLASH_VISIBLE_MS,
+  WRITING_PROMPTS,
   calculateStreak,
   contentToText,
   getWordCount,
   groupEntriesByDate,
+  isApplePlatform,
+  isPrimaryShortcut,
+  isRedoShortcut,
+  isUndoShortcut,
   normalizeTags,
   searchEntries,
+  selectSplashMessage,
+  selectWritingPrompt,
+  shortcutModifierLabel,
 } from "../src/utils.js";
 
 test("normalizes and deduplicates tags", () => {
@@ -16,6 +27,90 @@ test("normalizes and deduplicates tags", () => {
 test("counts CJK characters and latin words", () => {
   assert.equal(getWordCount("今天 feel so good"), 5);
   assert.equal(getWordCount(""), 0);
+});
+
+test("uses familiar shortcut modifiers across desktop and iPad keyboards", () => {
+  assert.equal(isApplePlatform("MacIntel"), true);
+  assert.equal(isApplePlatform("iPad"), true);
+  assert.equal(isApplePlatform("Win32"), false);
+  assert.equal(shortcutModifierLabel("MacIntel"), "⌘");
+  assert.equal(shortcutModifierLabel("iPhone"), "⌘");
+  assert.equal(shortcutModifierLabel("Win32"), "Ctrl");
+  assert.equal(shortcutModifierLabel("Linux x86_64"), "Ctrl");
+});
+
+test("recognizes Command and Control app shortcuts without hijacking modified variants", () => {
+  assert.equal(isPrimaryShortcut({ key: "K", metaKey: true }, "k"), true);
+  assert.equal(isPrimaryShortcut({ key: "k", ctrlKey: true }, "k"), true);
+  assert.equal(isPrimaryShortcut({ key: "k", ctrlKey: true, shiftKey: true }, "k"), false);
+  assert.equal(isPrimaryShortcut({ key: "k", ctrlKey: true, altKey: true }, "k"), false);
+  assert.equal(isPrimaryShortcut({ key: "k", ctrlKey: true, isComposing: true }, "k"), false);
+  assert.equal(isPrimaryShortcut({ key: "k", ctrlKey: true, repeat: true }, "k"), false);
+  assert.equal(
+    isPrimaryShortcut({ key: "k", ctrlKey: true, getModifierState: () => true }, "k"),
+    false,
+  );
+  assert.equal(isPrimaryShortcut({ key: "c" }, "c"), false);
+});
+
+test("recognizes native undo and redo conventions on Apple and Windows keyboards", () => {
+  assert.equal(isUndoShortcut({ key: "z", metaKey: true }), true);
+  assert.equal(isUndoShortcut({ key: "Z", ctrlKey: true }), true);
+  assert.equal(isRedoShortcut({ key: "z", metaKey: true, shiftKey: true }), true);
+  assert.equal(isRedoShortcut({ key: "z", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isRedoShortcut({ key: "y", ctrlKey: true }), true);
+  assert.equal(isRedoShortcut({ key: "y", metaKey: true }), false);
+  assert.equal(isRedoShortcut({ key: "z", metaKey: true, shiftKey: true, isComposing: true }), false);
+});
+
+test("selects every launch message deterministically and stays within the requested timing", () => {
+  const first = selectSplashMessage(0);
+  const last = selectSplashMessage(1);
+
+  assert.equal(first.index, 0);
+  assert.deepEqual(
+    { text: last.text, source: last.source },
+    SPLASH_MESSAGES[SPLASH_MESSAGES.length - 1],
+  );
+  assert.equal(last.index, SPLASH_MESSAGES.length - 1);
+  assert.ok(SPLASH_MESSAGES.length >= 10);
+  assert.equal(new Set(SPLASH_MESSAGES.map(({ text }) => text)).size, SPLASH_MESSAGES.length);
+  assert.ok(SPLASH_MESSAGES.every(({ text, source }) => text.length >= 10 && source.length > 0));
+  assert.ok(SPLASH_VISIBLE_MS >= 2000 && SPLASH_VISIBLE_MS <= 3000);
+  assert.ok(SPLASH_VISIBLE_MS + SPLASH_FADE_MS <= 3000);
+});
+
+test("selects writing prompts deterministically at both random boundaries", () => {
+  assert.deepEqual(selectWritingPrompt(0), { text: WRITING_PROMPTS[0], index: 0 });
+  assert.deepEqual(selectWritingPrompt(1), {
+    text: WRITING_PROMPTS[WRITING_PROMPTS.length - 1],
+    index: WRITING_PROMPTS.length - 1,
+  });
+  assert.equal(selectWritingPrompt(-10).index, 0);
+  assert.equal(selectWritingPrompt(10).index, WRITING_PROMPTS.length - 1);
+  assert.equal(selectWritingPrompt(Number.NaN).index, 0);
+  assert.equal(selectWritingPrompt(Number.POSITIVE_INFINITY).index, 0);
+});
+
+test("keeps writing prompts unique, non-empty, and varied", () => {
+  assert.ok(WRITING_PROMPTS.length >= 14);
+  assert.equal(new Set(WRITING_PROMPTS).size, WRITING_PROMPTS.length);
+  assert.ok(WRITING_PROMPTS.every((prompt) => typeof prompt === "string" && prompt.trim().length > 0));
+});
+
+test("avoids returning the same writing prompt twice in a row", () => {
+  const middleIndex = Math.floor(WRITING_PROMPTS.length / 2);
+  const sameBucketValue = (middleIndex + 0.25) / WRITING_PROMPTS.length;
+  const shifted = selectWritingPrompt(sameBucketValue, middleIndex);
+  assert.equal(shifted.index, (middleIndex + 1) % WRITING_PROMPTS.length);
+  assert.notEqual(shifted.text, WRITING_PROMPTS[middleIndex]);
+
+  const wrapped = selectWritingPrompt(1, WRITING_PROMPTS.length - 1);
+  assert.equal(wrapped.index, 0);
+  assert.equal(wrapped.text, WRITING_PROMPTS[0]);
+
+  assert.equal(selectWritingPrompt(0, -1).index, 0);
+  assert.equal(selectWritingPrompt(0, WRITING_PROMPTS.length).index, 0);
 });
 
 test("converts rich diary content to searchable plain text", () => {

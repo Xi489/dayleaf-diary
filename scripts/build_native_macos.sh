@@ -42,6 +42,7 @@ mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${MODULE_CACHE}"
   -target "${ARCH}-apple-macosx13.1" \
   -module-cache-path "${MODULE_CACHE}" \
   -framework Cocoa \
+  -framework CoreServices \
   -framework WebKit \
   "${SWIFT_SOURCE}" \
   -o "${MACOS_DIR}/Dayleaf"

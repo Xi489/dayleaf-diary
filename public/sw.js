@@ -1,4 +1,4 @@
-const CACHE_NAME = "dayleaf-v4";
+const CACHE_NAME = "dayleaf-v7";
 const APP_SHELL = [
   "/",
   "/index.html",

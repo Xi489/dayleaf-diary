@@ -1,6 +1,10 @@
 import { journalStore } from "./store.js";
 import {
   MOODS,
+  SPLASH_FADE_MS,
+  SPLASH_MESSAGES,
+  SPLASH_VISIBLE_MS,
+  WRITING_PROMPTS,
   calculateStreak,
   contentToText,
   escapeHtml,
@@ -8,9 +12,15 @@ import {
   formatEntryTime,
   getWordCount,
   groupEntriesByDate,
+  isPrimaryShortcut,
+  isRedoShortcut,
+  isUndoShortcut,
   normalizeTags,
   parseDateKey,
   searchEntries,
+  selectSplashMessage,
+  selectWritingPrompt,
+  shortcutModifierLabel,
   toDateKey,
 } from "./utils.js";
 
@@ -18,11 +28,20 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 const elements = {
+  appShell: $(".app-shell"),
+  workspace: $("#workspace"),
+  journalPanel: $("#journal-panel"),
+  listPane: $("#list-pane"),
+  splash: $("#splash-screen"),
+  splashMessage: $("#splash-message"),
+  splashSource: $("#splash-source"),
+  searchShortcutLabel: $("#search-shortcut-label"),
   search: $("#search-input"),
   entryList: $("#entry-list"),
   emptyList: $("#empty-list"),
   listTitle: $("#list-title"),
   editorPlaceholder: $("#editor-placeholder"),
+  editorPane: $("#editor-pane"),
   form: $("#entry-form"),
   date: $("#entry-date"),
   title: $("#entry-title"),
@@ -41,6 +60,33 @@ const elements = {
   favoriteCount: $("#favorite-count"),
   sidebar: $("#sidebar"),
   clearDateFilter: $("#clear-date-filter"),
+  dashboardDateTitle: $("#dashboard-date-title"),
+  dailyPrompt: $("#daily-prompt"),
+  promptAnswer: $("#prompt-answer"),
+  promptDraftStatus: $("#prompt-draft-status"),
+  promptShuffleButton: $("#prompt-shuffle-button"),
+  promptWriteButton: $("#prompt-write-button"),
+  widgetSettingsButton: $("#widget-settings-button"),
+  widgetSettingsDialog: $("#widget-settings-dialog"),
+  homeWidgetStart: $("#home-widget-start"),
+  homeWidgetEnd: $("#home-widget-end"),
+  reflectionWidget: $("#reflection-widget"),
+  reflectionCount: $("#reflection-count"),
+  reflectionDescription: $("#reflection-description"),
+  reflectionOpenButton: $("#reflection-open-button"),
+  musicWidget: $("#music-widget"),
+  musicConnectionStatus: $("#music-connection-status"),
+  musicTrackTitle: $("#music-track-title"),
+  musicTrackArtist: $("#music-track-artist"),
+  musicOpenButton: $("#music-open-button"),
+  musicPlayButton: $("#music-play-button"),
+  musicNextButton: $("#music-next-button"),
+  musicPermissionDetail: $("#music-permission-detail"),
+  breathingWidget: $("#breathing-widget"),
+  breathingVisual: $("#breathing-visual"),
+  breathingLabel: $("#breathing-label"),
+  breathingTime: $("#breathing-time"),
+  breathingToggleButton: $("#breathing-toggle-button"),
   backupDialog: $("#backup-dialog"),
   mediaDialog: $("#media-dialog"),
   mediaDialogTitle: $("#media-dialog-title"),
@@ -59,16 +105,6 @@ const elements = {
   importInput: $("#import-input"),
   toast: $("#toast"),
 };
-
-const prompts = [
-  "今天有什么微小的事情，让你觉得生活还不错？",
-  "如果给今天一种颜色，它会是什么？为什么？",
-  "写下一个今天想感谢的人，哪怕没有告诉对方。",
-  "今天的你，需要听见哪一句温柔的话？",
-  "有什么普通的瞬间，值得未来的你再看一眼？",
-  "最近有什么变化，正在悄悄发生？",
-  "此刻放下手机，你最先注意到什么？",
-];
 
 const emojiLibrary = [
   ["😊", "微笑 开心 温柔"], ["😂", "大笑 笑哭"], ["🥰", "喜欢 爱 幸福"],
@@ -90,14 +126,23 @@ const emojiLibrary = [
 ];
 
 const CUSTOM_STICKERS_KEY = "customStickers";
+const PROMPT_DRAFT_STORAGE_KEY = "dayleaf.prompt-draft.v1";
+const LAST_PROMPT_INDEX_KEY = "lastWritingPromptIndex";
+const HOME_WIDGETS_KEY = "homeWidgets";
+const HOME_WIDGET_IDS = ["reflection", "music", "breathing"];
 const MAX_CUSTOM_STICKERS = 12;
 const MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_MEDIA_DATA_CHARACTERS = 3_200_000;
+const MAX_EDITOR_HISTORY_STATES = 60;
+const MAX_EDITOR_HISTORY_CHARACTERS = 8_000_000;
+const EDITOR_HISTORY_COALESCE_MS = 850;
 const DATA_IMAGE_PATTERN = /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z\d+/=\s]+$/i;
 const ALLOWED_RICH_TAGS = new Set(["B", "BR", "DIV", "EM", "I", "IMG", "P", "S", "SPAN", "STRONG", "U"]);
 
 const state = {
+  view: "home",
   selectedId: null,
+  homeDate: toDateKey(),
   query: "",
   filter: "all",
   dateFilter: null,
@@ -113,7 +158,132 @@ const state = {
   openverseResults: { sticker: [], image: [] },
   openverseControllers: { sticker: null, image: null },
   forceNextSaveFailure: false,
+  forceHistoryCheckpoint: false,
+  restoringHistory: false,
+  promptIndex: -1,
+  promptText: "",
+  promptDate: toDateKey(),
+  promptDraftTimer: null,
+  promptDraftPending: false,
+  promptDraftSaveFailed: false,
+  homeWidgets: { reflection: false, music: false, breathing: false },
+  reflectionDates: [],
+  music: {
+    generation: 0,
+    pollTimer: null,
+    inFlight: false,
+    authorizing: false,
+    authorization: "unknown",
+    phase: "idle",
+    running: false,
+    playing: false,
+    title: "",
+    artist: "",
+  },
+  breathing: {
+    timer: null,
+    running: false,
+    endsAt: 0,
+    remainingMs: 60_000,
+  },
+  editorHistory: {
+    entryId: null,
+    states: [],
+    index: -1,
+    lastInputAt: 0,
+    lastInputType: "",
+  },
 };
+
+const splashState = {
+  phase: "visible",
+  quoteIndex: -1,
+  startedAt: null,
+  dismissedAt: null,
+  hiddenAt: null,
+  timer: null,
+  finishTimer: null,
+  clockStarted: false,
+  appReady: false,
+  reducedMotion: false,
+};
+
+function prepareSplash() {
+  const message = selectSplashMessage();
+  splashState.quoteIndex = message.index;
+  splashState.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  elements.splashMessage.textContent = message.text;
+  elements.splashSource.textContent = message.source;
+  elements.splash.dataset.quoteIndex = String(message.index);
+  elements.appShell.setAttribute("aria-hidden", "true");
+  elements.appShell.setAttribute("inert", "");
+}
+
+function finishSplash() {
+  if (splashState.phase === "hidden") return;
+  clearTimeout(splashState.timer);
+  clearTimeout(splashState.finishTimer);
+  splashState.phase = "hidden";
+  splashState.hiddenAt = performance.now();
+  elements.splash.hidden = true;
+  elements.splash.classList.remove("is-leaving");
+  document.body.classList.remove("splash-active", "splash-revealing");
+  elements.appShell.removeAttribute("aria-hidden");
+  elements.appShell.removeAttribute("inert");
+  clearTimeout(window.__dayleafSplashFallback);
+}
+
+function beginSplashDismissal() {
+  if (splashState.phase !== "visible") return;
+  splashState.phase = "leaving";
+  splashState.dismissedAt = performance.now();
+  elements.appShell.removeAttribute("aria-hidden");
+  elements.appShell.removeAttribute("inert");
+  document.body.classList.add("splash-revealing");
+  elements.splash.classList.add("is-leaving");
+  splashState.finishTimer = setTimeout(
+    finishSplash,
+    splashState.reducedMotion ? 40 : SPLASH_FADE_MS,
+  );
+}
+
+function startSplashClock() {
+  if (splashState.clockStarted || splashState.phase !== "visible") return false;
+  splashState.clockStarted = true;
+  const beginClock = () => {
+    if (splashState.phase !== "visible" || splashState.startedAt !== null) return;
+    splashState.startedAt = performance.now();
+    splashState.timer = setTimeout(beginSplashDismissal, SPLASH_VISIBLE_MS);
+  };
+  requestAnimationFrame(() => {
+    requestAnimationFrame(beginClock);
+  });
+  setTimeout(beginClock, 80);
+  return true;
+}
+
+function getSplashState() {
+  const now = performance.now();
+  const visibleUntil = splashState.dismissedAt ?? now;
+  return {
+    phase: splashState.phase,
+    quoteIndex: splashState.quoteIndex,
+    quoteCount: SPLASH_MESSAGES.length,
+    quote: elements.splashMessage.textContent,
+    source: elements.splashSource.textContent,
+    plannedDuration: SPLASH_VISIBLE_MS + SPLASH_FADE_MS,
+    visibleDuration: splashState.startedAt === null
+      ? 0
+      : Math.max(0, visibleUntil - splashState.startedAt),
+    startedAt: splashState.startedAt,
+    dismissedAt: splashState.dismissedAt,
+    hiddenAt: splashState.hiddenAt,
+    reducedMotion: splashState.reducedMotion,
+    appReady: splashState.appReady,
+    mainInert: elements.appShell.hasAttribute("inert"),
+    splashHidden: elements.splash.hidden,
+  };
+}
 
 function showToast(message) {
   elements.toast.textContent = message;
@@ -129,6 +299,491 @@ function setSaveState(message, pending = false) {
 
 function currentEntry() {
   return state.selectedId ? journalStore.get(state.selectedId) : null;
+}
+
+function promptTargetDate() {
+  return state.dateFilter || currentEntry()?.date || state.homeDate || toDateKey();
+}
+
+function formatPromptTarget(date) {
+  if (date === toDateKey()) return "写给今天";
+  const label = new Intl.DateTimeFormat("zh-CN", {
+    month: "long",
+    day: "numeric",
+  }).format(parseDateKey(date));
+  return `写给${label}`;
+}
+
+function readPromptDraft() {
+  try {
+    const draft = JSON.parse(localStorage.getItem(PROMPT_DRAFT_STORAGE_KEY) || "null");
+    const answer = String(draft?.answer || "").slice(0, 800);
+    const promptIndex = WRITING_PROMPTS.indexOf(String(draft?.prompt || ""));
+    if (!answer.trim() || promptIndex < 0) return null;
+    return {
+      answer,
+      date: /^\d{4}-\d{2}-\d{2}$/.test(draft?.date) ? draft.date : toDateKey(),
+      prompt: WRITING_PROMPTS[promptIndex],
+      promptIndex,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function updatePromptControls() {
+  const hasAnswer = Boolean(elements.promptAnswer.value.trim());
+  elements.promptWriteButton.disabled = !hasAnswer;
+  elements.promptShuffleButton.disabled = hasAnswer;
+  elements.promptShuffleButton.title = hasAnswer
+    ? "回答已保存为草稿，清空后可以换题"
+    : "换一个问题";
+  if (state.promptDraftSaveFailed) {
+    elements.promptDraftStatus.textContent = "草稿未保存";
+  } else if (state.promptDraftPending) {
+    elements.promptDraftStatus.textContent = "正在保存草稿…";
+  } else if (hasAnswer) {
+    elements.promptDraftStatus.textContent = "草稿已保存在本机";
+  } else {
+    elements.promptDraftStatus.textContent = formatPromptTarget(state.promptDate || promptTargetDate());
+  }
+}
+
+function flushPromptDraft() {
+  clearTimeout(state.promptDraftTimer);
+  state.promptDraftTimer = null;
+  state.promptDraftPending = false;
+  const answer = elements.promptAnswer.value.slice(0, 800);
+  try {
+    if (answer.trim()) {
+      localStorage.setItem(PROMPT_DRAFT_STORAGE_KEY, JSON.stringify({
+        answer,
+        date: state.promptDate || promptTargetDate(),
+        prompt: state.promptText,
+        updatedAt: new Date().toISOString(),
+      }));
+    } else {
+      localStorage.removeItem(PROMPT_DRAFT_STORAGE_KEY);
+    }
+    state.promptDraftSaveFailed = false;
+    updatePromptControls();
+    return true;
+  } catch {
+    state.promptDraftSaveFailed = true;
+    updatePromptControls();
+    return false;
+  }
+}
+
+function schedulePromptDraftSave() {
+  clearTimeout(state.promptDraftTimer);
+  state.promptDraftPending = true;
+  state.promptDraftSaveFailed = false;
+  updatePromptControls();
+  state.promptDraftTimer = setTimeout(flushPromptDraft, 320);
+}
+
+function setWritingPrompt({ text, index }, date = promptTargetDate()) {
+  state.promptIndex = index;
+  state.promptText = text;
+  state.promptDate = date;
+  elements.dailyPrompt.textContent = text;
+  try {
+    journalStore.setPreference(LAST_PROMPT_INDEX_KEY, index);
+  } catch {
+    // The prompt still works for this session if preferences cannot be saved.
+  }
+  updatePromptControls();
+}
+
+function chooseWritingPrompt() {
+  if (elements.promptAnswer.value.trim()) return false;
+  const previousIndex = state.promptIndex >= 0
+    ? state.promptIndex
+    : Number(journalStore.getPreference(LAST_PROMPT_INDEX_KEY, -1));
+  setWritingPrompt(selectWritingPrompt(Math.random(), previousIndex));
+  flushPromptDraft();
+  return true;
+}
+
+function initializeWritingPrompt() {
+  const draft = readPromptDraft();
+  if (draft) {
+    state.promptIndex = draft.promptIndex;
+    state.promptText = draft.prompt;
+    state.promptDate = draft.date;
+    elements.dailyPrompt.textContent = draft.prompt;
+    elements.promptAnswer.value = draft.answer;
+    updatePromptControls();
+    return;
+  }
+  chooseWritingPrompt();
+}
+
+function clearPromptDraft() {
+  clearTimeout(state.promptDraftTimer);
+  state.promptDraftTimer = null;
+  state.promptDraftPending = false;
+  state.promptDraftSaveFailed = false;
+  elements.promptAnswer.value = "";
+  try {
+    localStorage.removeItem(PROMPT_DRAFT_STORAGE_KEY);
+  } catch {}
+  updatePromptControls();
+}
+
+function flushAll() {
+  const entrySaved = flushSave();
+  const promptSaved = flushPromptDraft();
+  return entrySaved && promptSaved;
+}
+
+function normalizeHomeWidgets(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return Object.fromEntries(HOME_WIDGET_IDS.map((id) => [id, source[id] === true]));
+}
+
+function nativeWidgetHandler() {
+  return window.webkit?.messageHandlers?.dayleafWidgets || null;
+}
+
+async function requestNativeWidget(capability, action, { timeoutMs = 3500 } = {}) {
+  const handler = nativeWidgetHandler();
+  if (!handler?.postMessage) {
+    return { ok: false, code: "unsupported", data: {} };
+  }
+  let timeoutId;
+  try {
+    const response = await Promise.race([
+      Promise.resolve(handler.postMessage({ version: 1, capability, action })),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve({ ok: false, code: "timeout", data: {} }), timeoutMs);
+      }),
+    ]);
+    clearTimeout(timeoutId);
+    return response && typeof response === "object"
+      ? response
+      : { ok: false, code: "invalidReply", data: {} };
+  } catch {
+    clearTimeout(timeoutId);
+    return { ok: false, code: "bridgeError", data: {} };
+  }
+}
+
+function persistHomeWidgets(nextWidgets) {
+  const previous = state.homeWidgets;
+  state.homeWidgets = normalizeHomeWidgets(nextWidgets);
+  try {
+    journalStore.setPreference(HOME_WIDGETS_KEY, state.homeWidgets);
+    return true;
+  } catch (error) {
+    state.homeWidgets = previous;
+    showStorageError(error);
+    return false;
+  }
+}
+
+function widgetLayout() {
+  const start = state.homeWidgets.reflection;
+  const end = state.homeWidgets.music || state.homeWidgets.breathing;
+  if (start && end) return "both";
+  if (start) return "start";
+  if (end) return "end";
+  return "none";
+}
+
+function setRailVisibility(rail, visible) {
+  rail.hidden = !visible;
+  rail.toggleAttribute("inert", !visible);
+  rail.setAttribute("aria-hidden", String(!visible));
+}
+
+function renderReflectionWidget() {
+  const current = parseDateKey(state.homeDate || toDateKey());
+  const month = current.getMonth();
+  const day = current.getDate();
+  const currentYear = current.getFullYear();
+  state.reflectionDates = [...new Set(journalStore.getAll()
+    .filter((entry) => {
+      const date = parseDateKey(entry.date);
+      return date.getMonth() === month && date.getDate() === day && date.getFullYear() < currentYear;
+    })
+    .map((entry) => entry.date))];
+  const count = journalStore.getAll().filter((entry) => state.reflectionDates.includes(entry.date)).length;
+  elements.reflectionCount.textContent = count ? `${count} 篇旧时光` : "还没有往年记录";
+  elements.reflectionDescription.textContent = count
+    ? `来自 ${state.reflectionDates.length} 个往年同日，只展示数量，正文仍由你主动打开。`
+    : "日子积累起来后，这里会替你打开同一天的旧时光。";
+  elements.reflectionOpenButton.hidden = count === 0;
+  elements.reflectionOpenButton.textContent = "打开最近一年";
+}
+
+function updateTextContent(element, value) {
+  if (element.textContent !== value) element.textContent = value;
+}
+
+function renderMusicWidget() {
+  const music = state.music;
+  const supported = Boolean(nativeWidgetHandler()?.postMessage);
+  const statusText = {
+    requesting: "正在等待系统允许",
+    permission: "需要你的系统允许",
+    denied: "自动化权限未允许",
+    unavailable: "仅支持独立 macOS 版",
+    timeout: "连接暂时没有回应",
+    ready: music.running ? (music.playing ? "正在播放" : "已暂停") : "音乐尚未打开",
+    idle: supported ? "等待连接" : "仅支持独立 macOS 版",
+  }[music.phase] || "等待连接";
+  updateTextContent(elements.musicConnectionStatus, statusText);
+  updateTextContent(elements.musicTrackTitle, music.title || (supported ? "让一段音乐陪你写作" : "在 macOS 独立版中使用"));
+  updateTextContent(elements.musicTrackArtist, music.artist || (supported ? "打开音乐后，这里只显示当前曲目" : "网页版本不会访问本地软件"));
+  updateTextContent(elements.musicOpenButton, ["permission", "denied"].includes(music.phase)
+    ? "重新允许"
+    : (music.running ? "前往音乐" : "打开音乐"));
+  elements.musicPlayButton.disabled = !music.running || music.phase !== "ready";
+  elements.musicNextButton.disabled = !music.running || music.phase !== "ready";
+  elements.musicPlayButton.setAttribute("aria-pressed", String(music.playing));
+  elements.musicPlayButton.setAttribute("aria-label", music.playing ? "暂停音乐" : "播放音乐");
+  elements.musicPlayButton.innerHTML = music.playing
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>';
+}
+
+function clearMusicRuntime() {
+  state.music.generation += 1;
+  clearTimeout(state.music.pollTimer);
+  state.music.pollTimer = null;
+  Object.assign(state.music, {
+    inFlight: false,
+    phase: "idle",
+    running: false,
+    playing: false,
+    title: "",
+    artist: "",
+  });
+  renderMusicWidget();
+}
+
+async function refreshMusicStatus({ schedule = true, allowHidden = false } = {}) {
+  if (
+    !state.homeWidgets.music ||
+    (!allowHidden && document.hidden) ||
+    state.view !== "home" ||
+    state.music.inFlight
+  ) return;
+  const generation = state.music.generation;
+  state.music.inFlight = true;
+  const reply = await requestNativeWidget("music", "status");
+  if (generation !== state.music.generation || !state.homeWidgets.music) return;
+  state.music.inFlight = false;
+  if (reply.ok) {
+    Object.assign(state.music, {
+      authorization: reply.data?.authorization || state.music.authorization,
+      phase: "ready",
+      running: Boolean(reply.data?.running),
+      playing: Boolean(reply.data?.playing),
+      title: String(reply.data?.title || "").slice(0, 160),
+      artist: String(reply.data?.artist || "").slice(0, 160),
+    });
+  } else {
+    state.music.phase = reply.code === "denied"
+      ? "denied"
+      : (reply.code === "needsPermission" ? "permission" : (reply.code === "unsupported" ? "unavailable" : "timeout"));
+    if (reply.code === "denied") state.music.authorization = "denied";
+    Object.assign(state.music, { running: false, playing: false, title: "", artist: "" });
+  }
+  renderMusicWidget();
+  clearTimeout(state.music.pollTimer);
+  if (schedule && state.homeWidgets.music && !document.hidden && !["permission", "denied", "unavailable"].includes(state.music.phase)) {
+    state.music.pollTimer = setTimeout(refreshMusicStatus, 6000);
+  }
+}
+
+async function authorizeMusicWidget() {
+  if (state.music.authorizing) return false;
+  if (!nativeWidgetHandler()?.postMessage) {
+    state.music.phase = "unavailable";
+    renderMusicWidget();
+    showToast("音乐联动仅支持独立 macOS 版");
+    return false;
+  }
+  state.music.authorizing = true;
+  renderWidgetSettings();
+  try {
+  state.music.generation += 1;
+  clearTimeout(state.music.pollTimer);
+  state.music.pollTimer = null;
+  state.music.inFlight = false;
+  const generation = state.music.generation;
+  state.music.phase = "requesting";
+  renderMusicWidget();
+  const openReply = await requestNativeWidget("music", "openApp");
+  if (generation !== state.music.generation) return false;
+  if (!openReply.ok) {
+    state.music.phase = "timeout";
+    renderMusicWidget();
+    showToast("无法打开 macOS 音乐");
+    return false;
+  }
+
+  let reply = { ok: false, code: "notRunning", data: {} };
+  for (const waitMs of [350, 600, 900, 1200]) {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    if (generation !== state.music.generation) return false;
+    reply = await requestNativeWidget("music", "authorize", { timeoutMs: 120_000 });
+    if (reply.ok || reply.code !== "notRunning") break;
+  }
+  if (generation !== state.music.generation) return false;
+  if (!reply.ok) {
+    state.music.phase = reply.code === "denied" ? "denied" : "timeout";
+    state.music.authorization = reply.code === "denied" ? "denied" : "unknown";
+    renderMusicWidget();
+    showToast(reply.code === "denied" ? "没有获得音乐自动化权限" : "暂时无法连接音乐");
+    return false;
+  }
+  Object.assign(state.music, {
+    authorization: "authorized",
+    running: Boolean(reply.data?.running),
+    playing: Boolean(reply.data?.playing),
+    title: String(reply.data?.title || "").slice(0, 160),
+    artist: String(reply.data?.artist || "").slice(0, 160),
+  });
+  if (!persistHomeWidgets({ ...state.homeWidgets, music: true })) return false;
+  state.music.phase = "ready";
+  renderHomeWidgets();
+  await refreshMusicStatus();
+  return true;
+  } finally {
+    state.music.authorizing = false;
+    renderWidgetSettings();
+  }
+}
+
+async function performMusicAction(action) {
+  if (!state.homeWidgets.music) return;
+  const reply = await requestNativeWidget("music", action);
+  if (!reply.ok) {
+    showToast(reply.code === "denied" ? "请在系统设置中允许音乐自动化" : "音乐暂时没有回应");
+    state.music.phase = reply.code === "denied" ? "denied" : "timeout";
+    renderMusicWidget();
+    return;
+  }
+  if (action === "openApp") {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  await refreshMusicStatus({ schedule: true });
+}
+
+function breathingRemainingMs() {
+  return state.breathing.running
+    ? Math.max(0, state.breathing.endsAt - Date.now())
+    : state.breathing.remainingMs;
+}
+
+function renderBreathingWidget() {
+  const remaining = breathingRemainingMs();
+  const seconds = Math.ceil(remaining / 1000);
+  elements.breathingTime.textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  elements.breathingVisual.classList.toggle("is-running", state.breathing.running);
+  elements.breathingLabel.textContent = state.breathing.running
+    ? (seconds > 30 ? "吸气，再慢慢呼气" : "把注意力带回此刻")
+    : (remaining === 0 ? "这一分钟，留给了自己" : "准备好时，慢慢呼吸");
+  elements.breathingToggleButton.textContent = state.breathing.running
+    ? "暂停"
+    : (remaining > 0 && remaining < 60_000 ? "继续" : "开始静心");
+}
+
+function updateBreathingTimer() {
+  state.breathing.remainingMs = breathingRemainingMs();
+  if (state.breathing.remainingMs <= 0) {
+    clearInterval(state.breathing.timer);
+    state.breathing.timer = null;
+    state.breathing.running = false;
+    state.breathing.remainingMs = 0;
+    showToast("静心一分钟完成");
+  }
+  renderBreathingWidget();
+}
+
+function toggleBreathingTimer() {
+  if (state.breathing.running) {
+    state.breathing.remainingMs = breathingRemainingMs();
+    state.breathing.running = false;
+    clearInterval(state.breathing.timer);
+    state.breathing.timer = null;
+  } else {
+    if (state.breathing.remainingMs <= 0) state.breathing.remainingMs = 60_000;
+    state.breathing.running = true;
+    state.breathing.endsAt = Date.now() + state.breathing.remainingMs;
+    clearInterval(state.breathing.timer);
+    state.breathing.timer = setInterval(updateBreathingTimer, 250);
+  }
+  renderBreathingWidget();
+}
+
+function renderWidgetSettings() {
+  $$('[data-widget-enable]').forEach((button) => {
+    const enabled = state.homeWidgets[button.dataset.widgetEnable];
+    button.hidden = enabled;
+    button.setAttribute("aria-pressed", String(enabled));
+    const busy = button.dataset.widgetEnable === "music" && state.music.authorizing;
+    button.disabled = busy;
+    button.toggleAttribute("aria-busy", busy);
+  });
+  $$('[data-widget-disable]').forEach((button) => {
+    const enabled = state.homeWidgets[button.dataset.widgetDisable];
+    button.hidden = !enabled;
+  });
+  const supported = Boolean(nativeWidgetHandler()?.postMessage);
+  elements.musicPermissionDetail.textContent = supported
+    ? "开启时 macOS 会询问“自动化”权限；关闭后立即停止读取当前曲目。"
+    : "当前为网页版本；音乐联动仅在独立 macOS 版可用。";
+}
+
+function renderHomeWidgets() {
+  const homeVisible = state.view === "home";
+  const startVisible = homeVisible && state.homeWidgets.reflection;
+  const endVisible = homeVisible && (state.homeWidgets.music || state.homeWidgets.breathing);
+  elements.workspace.dataset.widgetLayout = widgetLayout();
+  elements.reflectionWidget.hidden = !state.homeWidgets.reflection;
+  elements.musicWidget.hidden = !state.homeWidgets.music;
+  elements.breathingWidget.hidden = !state.homeWidgets.breathing;
+  setRailVisibility(elements.homeWidgetStart, startVisible);
+  setRailVisibility(elements.homeWidgetEnd, endVisible);
+  if (state.homeWidgets.reflection) renderReflectionWidget();
+  if (state.homeWidgets.music) renderMusicWidget();
+  if (state.homeWidgets.breathing) renderBreathingWidget();
+  renderWidgetSettings();
+}
+
+async function enableHomeWidget(id) {
+  if (!HOME_WIDGET_IDS.includes(id) || state.homeWidgets[id]) return false;
+  if (id === "music") {
+    return authorizeMusicWidget();
+  }
+  if (!persistHomeWidgets({ ...state.homeWidgets, [id]: true })) return false;
+  renderHomeWidgets();
+  showToast(id === "reflection" ? "往年今日已开启" : "静心一分钟已开启");
+  return true;
+}
+
+function disableHomeWidget(id) {
+  if (!HOME_WIDGET_IDS.includes(id) || !state.homeWidgets[id]) return false;
+  const next = { ...state.homeWidgets, [id]: false };
+  if (!persistHomeWidgets(next)) return false;
+  if (id === "music") clearMusicRuntime();
+  if (id === "breathing") {
+    clearInterval(state.breathing.timer);
+    Object.assign(state.breathing, { timer: null, running: false, endsAt: 0, remainingMs: 60_000 });
+  }
+  renderHomeWidgets();
+  return true;
+}
+
+function initializeHomeWidgets() {
+  state.homeWidgets = normalizeHomeWidgets(journalStore.getPreference(HOME_WIDGETS_KEY, {}));
+  state.music.phase = nativeWidgetHandler()?.postMessage ? "idle" : "unavailable";
+  renderHomeWidgets();
 }
 
 function isSafeWebUrl(value) {
@@ -305,24 +960,307 @@ function setEditorCaret(range) {
   state.editorEntryId = state.selectedId;
 }
 
-function notifyEditorChanged() {
-  elements.content.dispatchEvent(new InputEvent("input", {
-    bubbles: true,
-    inputType: "insertFromPaste",
-  }));
+function nextMeaningfulSibling(node) {
+  let sibling = node?.nextSibling || null;
+  while (sibling?.nodeType === Node.TEXT_NODE && !sibling.textContent.trim()) {
+    sibling = sibling.nextSibling;
+  }
+  return sibling;
 }
 
-function insertTextAtCaret(text) {
+function isMediaLineBreak(node) {
+  return node instanceof HTMLDivElement && [...node.childNodes].every((child) =>
+    child instanceof HTMLBRElement ||
+    (child.nodeType === Node.TEXT_NODE && !child.textContent.trim())
+  );
+}
+
+function selectMediaGroup(image) {
+  if (!(image instanceof HTMLImageElement) || !elements.content.contains(image)) return false;
+  let lastNode = image;
+  if (image.dataset.mediaKind === "sticker") {
+    const spacer = image.nextSibling;
+    if (spacer?.nodeType === Node.TEXT_NODE && !spacer.textContent.replaceAll("\u00a0", "").trim()) {
+      lastNode = spacer;
+    }
+  } else {
+    const credit = nextMeaningfulSibling(image);
+    if (credit instanceof HTMLElement && credit.classList.contains("media-credit")) {
+      lastNode = credit;
+    }
+    const lineBreak = nextMeaningfulSibling(lastNode);
+    if (isMediaLineBreak(lineBreak)) lastNode = lineBreak;
+  }
+
+  const range = document.createRange();
+  range.setStartBefore(image);
+  range.setEndAfter(lastNode);
+  setEditorCaret(range);
+  return true;
+}
+
+function editorNodePath(node) {
+  const path = [];
+  let cursor = node;
+  while (cursor && cursor !== elements.content) {
+    const parent = cursor.parentNode;
+    if (!parent) return null;
+    const index = [...parent.childNodes].indexOf(cursor);
+    if (index < 0) return null;
+    path.unshift(index);
+    cursor = parent;
+  }
+  return cursor === elements.content ? path : null;
+}
+
+function editorNodeAtPath(path) {
+  let node = elements.content;
+  for (const index of path || []) {
+    node = node?.childNodes?.[index];
+    if (!node) return null;
+  }
+  return node;
+}
+
+function editorSelectionSnapshot() {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  if (!rangeBelongsToEditor(range)) return null;
+  const startPath = editorNodePath(range.startContainer);
+  const endPath = editorNodePath(range.endContainer);
+  if (!startPath || !endPath) return null;
+  return {
+    startPath,
+    startOffset: range.startOffset,
+    endPath,
+    endOffset: range.endOffset,
+  };
+}
+
+function editorSnapshot() {
+  return {
+    html: elements.content.innerHTML,
+    selection: editorSelectionSnapshot(),
+  };
+}
+
+function resetEditorHistory() {
+  state.editorHistory = {
+    entryId: state.selectedId,
+    states: state.selectedId ? [editorSnapshot()] : [],
+    index: state.selectedId ? 0 : -1,
+    lastInputAt: 0,
+    lastInputType: "",
+  };
+  state.forceHistoryCheckpoint = false;
+}
+
+function updateCurrentHistorySelection() {
+  const history = state.editorHistory;
+  const snapshot = history.states[history.index];
+  if (history.entryId !== state.selectedId || !snapshot) return;
+  snapshot.selection = editorSelectionSnapshot();
+}
+
+function trimEditorHistory() {
+  const history = state.editorHistory;
+  const totalCharacters = () => history.states.reduce((total, item) => total + item.html.length, 0);
+  while (
+    history.states.length > 2 &&
+    (history.states.length > MAX_EDITOR_HISTORY_STATES || totalCharacters() > MAX_EDITOR_HISTORY_CHARACTERS)
+  ) {
+    history.states.shift();
+    history.index -= 1;
+  }
+}
+
+function recordEditorHistory(event) {
+  if (state.restoringHistory || !state.selectedId || elements.form.hidden) return;
+  if (state.editorHistory.entryId !== state.selectedId) resetEditorHistory();
+  const history = state.editorHistory;
+  const snapshot = editorSnapshot();
+  const current = history.states[history.index];
+  if (current?.html === snapshot.html) {
+    current.selection = snapshot.selection;
+    state.forceHistoryCheckpoint = false;
+    return;
+  }
+
+  history.states = history.states.slice(0, history.index + 1);
+  const now = performance.now();
+  const inputType = String(event?.inputType || "input");
+  const textLikeInput = /^(?:deleteContentBackward|deleteContentForward|insertCompositionText|insertText)$/.test(inputType);
+  const canCoalesce =
+    !state.forceHistoryCheckpoint &&
+    textLikeInput &&
+    history.index > 0 &&
+    /^(?:deleteContentBackward|deleteContentForward|insertCompositionText|insertText)$/.test(history.lastInputType) &&
+    now - history.lastInputAt <= EDITOR_HISTORY_COALESCE_MS;
+
+  if (canCoalesce) {
+    history.states[history.index] = snapshot;
+  } else {
+    history.states.push(snapshot);
+    history.index = history.states.length - 1;
+  }
+  history.lastInputAt = now;
+  history.lastInputType = inputType;
+  state.forceHistoryCheckpoint = false;
+  trimEditorHistory();
+}
+
+function restoreEditorSelection(selectionSnapshot) {
+  const range = document.createRange();
+  const startNode = editorNodeAtPath(selectionSnapshot?.startPath);
+  const endNode = editorNodeAtPath(selectionSnapshot?.endPath);
+  try {
+    if (!startNode || !endNode) throw new Error("missing selection node");
+    const startLimit = startNode.nodeType === Node.TEXT_NODE
+      ? startNode.textContent.length
+      : startNode.childNodes.length;
+    const endLimit = endNode.nodeType === Node.TEXT_NODE
+      ? endNode.textContent.length
+      : endNode.childNodes.length;
+    range.setStart(startNode, Math.min(selectionSnapshot.startOffset, startLimit));
+    range.setEnd(endNode, Math.min(selectionSnapshot.endOffset, endLimit));
+  } catch {
+    range.selectNodeContents(elements.content);
+    range.collapse(false);
+  }
+  setEditorCaret(range);
+}
+
+function restoreEditorSnapshot(snapshot) {
+  state.restoringHistory = true;
+  elements.content.innerHTML = snapshot.html;
+  state.restoringHistory = false;
+  elements.content.focus();
+  restoreEditorSelection(snapshot.selection);
+  updateEditorWordCount();
+  scheduleSave();
+}
+
+function undoEditorChange() {
+  const history = state.editorHistory;
+  if (history.entryId !== state.selectedId || history.index <= 0) return false;
+  history.index -= 1;
+  restoreEditorSnapshot(history.states[history.index]);
+  return true;
+}
+
+function redoEditorChange() {
+  const history = state.editorHistory;
+  if (history.entryId !== state.selectedId || history.index >= history.states.length - 1) return false;
+  history.index += 1;
+  restoreEditorSnapshot(history.states[history.index]);
+  return true;
+}
+
+function editorOwnsFocus() {
+  return document.activeElement === elements.content;
+}
+
+function notifyEditorChanged(inputType = "insertText") {
+  let event;
+  try {
+    event = new InputEvent("input", { bubbles: true, inputType });
+  } catch {
+    event = new Event("input", { bubbles: true });
+  }
+  elements.content.dispatchEvent(event);
+}
+
+function executeEditorCommand(command, value, inputType) {
+  if (typeof document.execCommand !== "function") return false;
+  updateCurrentHistorySelection();
+  state.forceHistoryCheckpoint = true;
+  let inputFired = false;
+  const markInput = () => {
+    inputFired = true;
+  };
+  elements.content.addEventListener("input", markInput, { once: true });
+  let succeeded = false;
+  try {
+    succeeded = document.execCommand(command, false, value);
+  } catch {
+    succeeded = false;
+  }
+  elements.content.removeEventListener("input", markInput);
+  if (succeeded && !inputFired) notifyEditorChanged(inputType);
+  if (!succeeded && !inputFired) state.forceHistoryCheckpoint = false;
+  return succeeded || inputFired;
+}
+
+function insertTextAtCaret(text, inputType = "insertText") {
   if (!state.selectedId || (state.mediaEntryId && state.mediaEntryId !== state.selectedId)) return false;
   elements.content.focus();
   const range = editorInsertionRange();
+  setEditorCaret(range);
+  if (executeEditorCommand("insertText", String(text || ""), inputType)) {
+    captureEditorRange();
+    return true;
+  }
   range.deleteContents();
   const node = document.createTextNode(String(text || ""));
   range.insertNode(node);
   range.setStartAfter(node);
   range.collapse(true);
   setEditorCaret(range);
-  notifyEditorChanged();
+  notifyEditorChanged(inputType);
+  return true;
+}
+
+function insertRichHtmlAtCaret(html, inputType = "insertFromPaste") {
+  if (!state.selectedId || (state.mediaEntryId && state.mediaEntryId !== state.selectedId)) return false;
+  const safeHtml = sanitizeRichContent(html);
+  if (!safeHtml) return false;
+  assertMediaBudget(dataImageCharacterCount(safeHtml));
+  elements.content.focus();
+  const range = editorInsertionRange();
+  setEditorCaret(range);
+  if (executeEditorCommand("insertHTML", safeHtml, inputType)) {
+    captureEditorRange();
+    return true;
+  }
+
+  range.deleteContents();
+  const fragment = range.createContextualFragment(safeHtml);
+  const lastNode = fragment.lastChild;
+  range.insertNode(fragment);
+  if (lastNode) range.setStartAfter(lastNode);
+  range.collapse(true);
+  setEditorCaret(range);
+  notifyEditorChanged(inputType);
+  return true;
+}
+
+function insertClipboardHtmlAtCaret(html, inputType = "insertFromPaste") {
+  const safeHtml = sanitizeRichContent(html);
+  if (!safeHtml) return false;
+  const containsMedia = dataImageCharacterCount(safeHtml) > 0;
+  const beforeInsertion = containsMedia ? editorSnapshot() : null;
+  if (!insertRichHtmlAtCaret(safeHtml, inputType)) return false;
+  if (!containsMedia) return true;
+
+  if (flushSave()) {
+    renderStats();
+    renderCalendar();
+    renderList();
+    return true;
+  }
+
+  if (!undoEditorChange() && beforeInsertion) {
+    restoreEditorSnapshot(beforeInsertion);
+    resetEditorHistory();
+  }
+  const recovered = flushSave();
+  if (recovered) {
+    renderStats();
+    renderCalendar();
+    renderList();
+    showToast("存储空间不足，剪贴板中的图片未插入");
+  }
   return true;
 }
 
@@ -352,38 +1290,64 @@ function insertMediaDataUrl(dataUrl, kind, metadata = {}, targetRange = null) {
   }
 
   const mediaKind = kind === "sticker" ? "sticker" : "image";
-  const image = document.createElement("img");
+  let image = document.createElement("img");
   image.src = dataUrl;
   image.className = mediaKind === "sticker" ? "inline-sticker" : "diary-image";
   image.dataset.mediaKind = mediaKind;
   image.alt = String(metadata.alt || (mediaKind === "sticker" ? "表情包" : "图片")).slice(0, 160);
   mediaMetadataAttributes(image, metadata);
 
+  const insertionId = `media-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  image.dataset.dayleafInsertion = insertionId;
+  const credit = mediaKind === "image" && metadata.attribution
+    ? document.createElement("span")
+    : null;
+  if (credit) {
+    credit.className = "media-credit";
+    credit.contentEditable = "false";
+    credit.textContent = String(metadata.attribution).slice(0, 600);
+  }
+  const lineBreak = mediaKind === "image" ? document.createElement("div") : null;
+  lineBreak?.append(document.createElement("br"));
+
+  const commandHtml = mediaKind === "sticker"
+    ? `${image.outerHTML}&nbsp;`
+    : `${image.outerHTML}${credit?.outerHTML || ""}${lineBreak.outerHTML}`;
+
   elements.content.focus();
   const range = rangeBelongsToEditor(targetRange) ? targetRange.cloneRange() : editorInsertionRange();
-  range.deleteContents();
-  range.insertNode(image);
+  setEditorCaret(range);
+  const insertedWithCommand = executeEditorCommand("insertHTML", commandHtml, "insertHTML");
+  if (insertedWithCommand) {
+    const insertedImage = elements.content.querySelector(`[data-dayleaf-insertion="${insertionId}"]`);
+    if (!insertedImage) throw new Error("图片插入后无法定位");
+    image = insertedImage;
+    image.removeAttribute("data-dayleaf-insertion");
+    image.dayleafUndoableInsertion = true;
+  } else {
+    image.removeAttribute("data-dayleaf-insertion");
+    range.deleteContents();
+    range.insertNode(image);
+    if (mediaKind === "sticker") {
+      image.after(document.createTextNode("\u00a0"));
+    } else {
+      image.after(...[credit, lineBreak].filter(Boolean));
+    }
+    notifyEditorChanged("insertHTML");
+  }
 
   let caretNode;
   if (mediaKind === "sticker") {
-    caretNode = document.createTextNode("\u00a0");
-    image.after(caretNode);
+    caretNode = image.nextSibling || document.createTextNode("\u00a0");
+    if (!caretNode.parentNode) image.after(caretNode);
     image.dayleafCompanionNodes = [caretNode];
   } else {
-    const lineBreak = document.createElement("div");
-    lineBreak.append(document.createElement("br"));
-    if (metadata.attribution) {
-      const credit = document.createElement("span");
-      credit.className = "media-credit";
-      credit.contentEditable = "false";
-      credit.textContent = String(metadata.attribution).slice(0, 600);
-      image.after(credit, lineBreak);
-      image.dayleafCompanionNodes = [credit, lineBreak];
-    } else {
-      image.after(lineBreak);
-      image.dayleafCompanionNodes = [lineBreak];
-    }
-    caretNode = lineBreak;
+    const insertedCredit = metadata.attribution && image.nextElementSibling?.classList.contains("media-credit")
+      ? image.nextElementSibling
+      : null;
+    const insertedLineBreak = insertedCredit?.nextElementSibling || image.nextElementSibling;
+    caretNode = insertedLineBreak || lineBreak;
+    image.dayleafCompanionNodes = [insertedCredit, insertedLineBreak].filter(Boolean);
   }
 
   const nextRange = document.createRange();
@@ -395,12 +1359,12 @@ function insertMediaDataUrl(dataUrl, kind, metadata = {}, targetRange = null) {
   }
   nextRange.collapse(true);
   setEditorCaret(nextRange);
-  notifyEditorChanged();
   return image;
 }
 
 function rollbackMediaInsertion(image) {
   if (!image?.parentNode) return;
+  if (image.dayleafUndoableInsertion && undoEditorChange()) return;
   const parent = image.parentNode;
   const offset = [...parent.childNodes].indexOf(image);
   (image.dayleafCompanionNodes || []).forEach((node) => node.remove());
@@ -409,7 +1373,7 @@ function rollbackMediaInsertion(image) {
   range.setStart(parent, Math.max(0, Math.min(offset, parent.childNodes.length)));
   range.collapse(true);
   setEditorCaret(range);
-  notifyEditorChanged();
+  notifyEditorChanged("historyUndo");
 }
 
 function commitMediaInsertion(image) {
@@ -959,7 +1923,43 @@ async function insertImageFromUrl() {
   }
 }
 
+function renderLayout() {
+  if (state.view === "editor" && !currentEntry()) state.view = "list";
+  const panelVisible = state.view !== "home";
+  const editorVisible = state.view === "editor";
+  elements.workspace.dataset.view = state.view;
+  elements.journalPanel.toggleAttribute("inert", !panelVisible);
+  elements.journalPanel.setAttribute("aria-hidden", String(!panelVisible));
+  elements.editorPane.toggleAttribute("inert", !editorVisible);
+  elements.editorPane.setAttribute("aria-hidden", String(!editorVisible));
+  if (!panelVisible) elements.sidebar.classList.remove("mobile-open");
+
+  const dashboardDate = parseDateKey(state.homeDate || toDateKey());
+  const dashboardLabel = new Intl.DateTimeFormat("zh-CN", {
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+  }).format(dashboardDate);
+  elements.dashboardDateTitle.textContent = state.homeDate === toDateKey()
+    ? `今天，${dashboardLabel}`
+    : dashboardLabel;
+  renderHomeWidgets();
+  if (
+    state.view === "home" &&
+    state.homeWidgets.music &&
+    !state.music.pollTimer &&
+    !state.music.inFlight &&
+    !["permission", "denied", "unavailable"].includes(state.music.phase)
+  ) {
+    refreshMusicStatus();
+  } else if (state.view !== "home") {
+    clearTimeout(state.music.pollTimer);
+    state.music.pollTimer = null;
+  }
+}
+
 function render() {
+  renderLayout();
   renderStats();
   renderCalendar();
   renderList();
@@ -983,11 +1983,25 @@ function renderCalendar() {
   const year = state.monthCursor.getFullYear();
   const month = state.monthCursor.getMonth();
   const selected = currentEntry();
-  const selectedDate = state.dateFilter || selected?.date;
+  const selectedDate = state.view === "home"
+    ? state.homeDate
+    : (state.dateFilter || selected?.date || null);
   const entriesByDate = groupEntriesByDate(journalStore.getAll());
   const firstDay = new Date(year, month, 1);
   const leading = (firstDay.getDay() + 6) % 7;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const selectedDateValue = selectedDate ? parseDateKey(selectedDate) : null;
+  const selectedDateInMonth = selectedDateValue &&
+    selectedDateValue.getFullYear() === year &&
+    selectedDateValue.getMonth() === month
+    ? selectedDate
+    : null;
+  const today = new Date();
+  const focusDate = selectedDateInMonth || (
+    year === today.getFullYear() && month === today.getMonth()
+      ? toDateKey(today)
+      : toDateKey(firstDay)
+  );
 
   elements.calendarTitle.textContent = new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
@@ -1013,8 +2027,10 @@ function renderCalendar() {
     const countBadge = entryCount > 1
       ? `<span class="calendar-day-count" aria-hidden="true">${entryCount > 9 ? "9+" : entryCount}</span>`
       : "";
+    const currentAttribute = dateKey === toDateKey() ? ' aria-current="date"' : "";
+    const selectedAttribute = selectedDate === dateKey ? ' aria-pressed="true"' : ' aria-pressed="false"';
     cells.push(
-      `<button class="${classes}" data-date="${dateKey}" aria-label="${dateKey}${entryCount ? `，${entryCount}篇日记` : ""}"><span>${day}</span>${countBadge}</button>`,
+      `<button class="${classes}" data-date="${dateKey}" tabindex="${focusDate === dateKey ? "0" : "-1"}"${currentAttribute}${selectedAttribute} aria-label="${dateKey}${entryCount ? `，${entryCount}篇日记` : "，没有日记"}"><span>${day}</span>${countBadge}</button>`,
     );
   }
   elements.calendarGrid.innerHTML = cells.join("");
@@ -1077,7 +2093,10 @@ function renderEditor() {
   state.mediaEntryId = null;
   state.isDirty = false;
   state.saveFailed = false;
-  if (!entry) return;
+  if (!entry) {
+    resetEditorHistory();
+    return;
+  }
 
   elements.date.value = entry.date;
   elements.title.value = entry.title;
@@ -1093,6 +2112,7 @@ function renderEditor() {
     button.classList.toggle("active", button.dataset.mood === entry.mood);
   });
   updateEditorWordCount();
+  resetEditorHistory();
 }
 
 function selectEntry(id, { focus = false } = {}) {
@@ -1101,11 +2121,31 @@ function selectEntry(id, { focus = false } = {}) {
   state.openverseControllers.sticker?.abort();
   state.openverseControllers.image?.abort();
   state.selectedId = id;
+  state.view = "editor";
   const entry = currentEntry();
   state.monthCursor = new Date(parseDateKey(entry.date).getFullYear(), parseDateKey(entry.date).getMonth(), 1);
   render();
   elements.sidebar.classList.remove("mobile-open");
   if (focus) requestAnimationFrame(() => elements.title.focus());
+}
+
+function goHome() {
+  if (!flushSave()) return false;
+  state.openverseControllers.sticker?.abort();
+  state.openverseControllers.image?.abort();
+  state.view = "home";
+  state.selectedId = null;
+  state.dateFilter = null;
+  state.filter = "all";
+  state.query = "";
+  state.homeDate = toDateKey();
+  if (!elements.promptAnswer.value.trim()) state.promptDate = state.homeDate;
+  state.monthCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  elements.search.value = "";
+  syncFilterButtons();
+  render();
+  updatePromptControls();
+  return true;
 }
 
 function syncFilterButtons() {
@@ -1114,54 +2154,102 @@ function syncFilterButtons() {
   });
 }
 
-function showDate(date, { createIfEmpty = false } = {}) {
+function showDate(date) {
   if (!flushSave()) return;
   state.openverseControllers.sticker?.abort();
   state.openverseControllers.image?.abort();
   state.dateFilter = date;
+  state.homeDate = date;
   state.filter = "all";
   state.query = "";
   elements.search.value = "";
   syncFilterButtons();
 
-  const entries = searchEntries(journalStore.getAll(), "", "all", date);
-  if (!entries.length && createIfEmpty) {
-    createEntry(date);
-    return;
-  }
-
-  state.selectedId = entries[0]?.id || null;
+  state.selectedId = null;
+  state.view = "list";
+  if (!elements.promptAnswer.value.trim()) state.promptDate = date;
   state.monthCursor = new Date(
     parseDateKey(date).getFullYear(),
     parseDateKey(date).getMonth(),
     1,
   );
   render();
+  updatePromptControls();
   elements.sidebar.classList.remove("mobile-open");
 }
 
-function createEntry(date = toDateKey()) {
-  if (!flushSave()) return;
+function createEntry(date = state.dateFilter || toDateKey()) {
+  if (!flushSave()) return null;
   let entry;
   try {
     entry = journalStore.create({ date });
   } catch (error) {
     showStorageError(error);
-    return;
+    return null;
   }
   const dayCount = journalStore.getAll().filter((item) => item.date === date).length;
   state.selectedId = entry.id;
+  state.view = "editor";
   state.query = "";
   state.filter = "all";
-  if (state.dateFilter !== date) {
-    state.dateFilter = null;
-  }
+  state.dateFilter = date;
+  state.homeDate = date;
   elements.search.value = "";
   syncFilterButtons();
   state.monthCursor = new Date(parseDateKey(date).getFullYear(), parseDateKey(date).getMonth(), 1);
   render();
   requestAnimationFrame(() => elements.title.focus());
   showToast(dayCount > 1 ? `这一天的第 ${dayCount} 篇日记已准备好` : "新日记已准备好");
+  return entry;
+}
+
+function createPromptEntry() {
+  const answer = elements.promptAnswer.value.trim();
+  if (!answer) {
+    elements.promptAnswer.focus();
+    return null;
+  }
+  if (!flushAll()) {
+    showToast("回答草稿还没有保存，请稍后再试");
+    return null;
+  }
+
+  const date = state.promptDate || promptTargetDate();
+  const title = state.promptText.replace(/[？?。！!]+$/g, "").slice(0, 28) || "今日一问";
+  let entry;
+  try {
+    entry = journalStore.create({
+      date,
+      title,
+      content: `${state.promptText}\n\n${answer}`,
+      contentFormat: "text",
+      tags: ["写作提示"],
+    });
+  } catch (error) {
+    showStorageError(error);
+    return null;
+  }
+
+  clearPromptDraft();
+  state.selectedId = entry.id;
+  state.view = "editor";
+  state.query = "";
+  state.filter = "all";
+  state.dateFilter = date;
+  state.homeDate = date;
+  elements.search.value = "";
+  syncFilterButtons();
+  state.monthCursor = new Date(parseDateKey(date).getFullYear(), parseDateKey(date).getMonth(), 1);
+  render();
+  requestAnimationFrame(() => {
+    const range = document.createRange();
+    range.selectNodeContents(elements.content);
+    range.collapse(false);
+    elements.content.focus();
+    setEditorCaret(range);
+  });
+  showToast("回答已经写进日记");
+  return entry;
 }
 
 function collectFormData() {
@@ -1240,6 +2328,56 @@ function moveMonth(amount) {
   renderCalendar();
 }
 
+function focusCalendarDate(date) {
+  const parsed = parseDateKey(date);
+  const monthChanged =
+    parsed.getFullYear() !== state.monthCursor.getFullYear() ||
+    parsed.getMonth() !== state.monthCursor.getMonth();
+  if (monthChanged) {
+    state.monthCursor = new Date(parsed.getFullYear(), parsed.getMonth(), 1);
+    renderCalendar();
+  }
+  requestAnimationFrame(() => {
+    const target = elements.calendarGrid.querySelector(`[data-date="${date}"]`);
+    if (!target) return;
+    elements.calendarGrid.querySelectorAll("[data-date]").forEach((button) => {
+      button.tabIndex = button === target ? 0 : -1;
+    });
+    target.focus();
+  });
+}
+
+function handleCalendarKeydown(event) {
+  const button = event.target.closest?.("[data-date]");
+  if (!button) return;
+  const current = parseDateKey(button.dataset.date);
+  let target = null;
+  if (event.key === "ArrowLeft") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() - 1);
+  if (event.key === "ArrowRight") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1);
+  if (event.key === "ArrowUp") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() - 7);
+  if (event.key === "ArrowDown") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 7);
+  if (event.key === "Home") {
+    const offset = (current.getDay() + 6) % 7;
+    target = new Date(current.getFullYear(), current.getMonth(), current.getDate() - offset);
+  }
+  if (event.key === "End") {
+    const offset = 6 - ((current.getDay() + 6) % 7);
+    target = new Date(current.getFullYear(), current.getMonth(), current.getDate() + offset);
+  }
+  if (["PageUp", "PageDown"].includes(event.key)) {
+    const direction = event.key === "PageUp" ? -1 : 1;
+    const targetMonth = new Date(current.getFullYear(), current.getMonth() + direction, 1);
+    const targetDay = Math.min(
+      current.getDate(),
+      new Date(targetMonth.getFullYear(), targetMonth.getMonth() + 1, 0).getDate(),
+    );
+    target = new Date(targetMonth.getFullYear(), targetMonth.getMonth(), targetDay);
+  }
+  if (!target) return;
+  event.preventDefault();
+  focusCalendarDate(toDateKey(target));
+}
+
 function downloadFile(name, content, type) {
   const nativeSaver = window.webkit?.messageHandlers?.dayleafSaveFile;
   if (nativeSaver) {
@@ -1305,7 +2443,9 @@ async function importBackup(file) {
       preferenceUpdates,
     );
     renderCustomStickers();
-    state.selectedId = journalStore.getAll()[0]?.id || null;
+    state.selectedId = null;
+    state.view = "home";
+    state.homeDate = toDateKey();
     state.dateFilter = null;
     state.filter = "all";
     state.query = "";
@@ -1358,7 +2498,9 @@ function importNativeBackup(backupText) {
     ? allEntries.find((entry) => entry.id === String(latestIncoming.id))
     : null;
 
-  state.selectedId = importedLatest?.id || allEntries[0]?.id || null;
+  state.selectedId = null;
+  state.view = "home";
+  state.homeDate = toDateKey();
   state.dateFilter = null;
   state.filter = "all";
   state.query = "";
@@ -1414,17 +2556,97 @@ function initializeTheme() {
   setTheme(saved || preferred);
 }
 
+function platformName() {
+  return navigator.userAgentData?.platform || navigator.platform || "";
+}
+
+function initializeShortcutHints() {
+  const modifier = shortcutModifierLabel(platformName());
+  elements.searchShortcutLabel.textContent = `${modifier} K`;
+  $("#new-entry-button").title = `写日记 (${modifier} N)`;
+  elements.content.dataset.shortcutModifier = modifier;
+}
+
+function focusDiarySearch() {
+  if (splashState.phase !== "hidden" || $("dialog[open]")) return false;
+  if (!flushSave()) return false;
+  state.view = "list";
+  state.selectedId = null;
+  state.dateFilter = null;
+  syncFilterButtons();
+  render();
+  elements.search.focus();
+  elements.search.select();
+  return true;
+}
+
+function saveCurrentEntry() {
+  const hadEntry = Boolean(currentEntry());
+  if (!flushAll()) return false;
+  renderStats();
+  renderCalendar();
+  renderList();
+  showToast(hadEntry ? "日记已保存" : "草稿已保存");
+  return true;
+}
+
 function bindEvents() {
   $("#new-entry-button").addEventListener("click", () => createEntry());
   $("#empty-new-button").addEventListener("click", () => createEntry(state.dateFilter || toDateKey()));
-  $("#brand-button").addEventListener("click", () => {
-    showDate(toDateKey());
+  $("#brand-button").addEventListener("click", goHome);
+  elements.promptAnswer.addEventListener("input", schedulePromptDraftSave);
+  elements.promptShuffleButton.addEventListener("click", chooseWritingPrompt);
+  elements.promptWriteButton.addEventListener("click", createPromptEntry);
+  elements.widgetSettingsButton.addEventListener("click", () => {
+    renderWidgetSettings();
+    elements.widgetSettingsDialog.showModal();
+    requestAnimationFrame(() => $("#widget-settings-title")?.focus());
+  });
+  elements.widgetSettingsDialog.addEventListener("close", () => elements.widgetSettingsButton.focus());
+  $$('[data-widget-enable]').forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.widgetEnable;
+      const enabled = await enableHomeWidget(id);
+      if (enabled && elements.widgetSettingsDialog.open) {
+        elements.widgetSettingsDialog.querySelector(`[data-widget-disable="${id}"]`)?.focus();
+      }
+    });
+  });
+  $$('[data-widget-disable]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.widgetDisable;
+      const disabled = disableHomeWidget(id);
+      if (disabled && elements.widgetSettingsDialog.open) {
+        elements.widgetSettingsDialog.querySelector(`[data-widget-enable="${id}"]`)?.focus();
+      }
+    });
+  });
+  elements.reflectionOpenButton.addEventListener("click", () => {
+    const latestReflectionDate = [...state.reflectionDates].sort().at(-1);
+    if (latestReflectionDate) showDate(latestReflectionDate);
+  });
+  elements.musicOpenButton.addEventListener("click", () => {
+    if (["permission", "denied"].includes(state.music.phase)) authorizeMusicWidget();
+    else performMusicAction("openApp");
+  });
+  elements.musicPlayButton.addEventListener("click", () => performMusicAction("playPause"));
+  elements.musicNextButton.addEventListener("click", () => performMusicAction("next"));
+  elements.breathingToggleButton.addEventListener("click", toggleBreathingTimer);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearTimeout(state.music.pollTimer);
+      state.music.pollTimer = null;
+    } else if (state.view === "home" && state.homeWidgets.music) {
+      refreshMusicStatus();
+    }
   });
   elements.clearDateFilter.addEventListener("click", () => {
+    if (!flushSave()) return;
     state.dateFilter = null;
+    state.selectedId = null;
+    state.view = "list";
     syncFilterButtons();
-    renderCalendar();
-    renderList();
+    render();
   });
   $("#previous-month").addEventListener("click", () => moveMonth(-1));
   $("#next-month").addEventListener("click", () => moveMonth(1));
@@ -1432,15 +2654,21 @@ function bindEvents() {
   $("#mobile-back-button").addEventListener("click", () => {
     if (!flushSave()) return;
     state.selectedId = null;
+    state.view = "list";
     render();
   });
 
   elements.search.addEventListener("input", (event) => {
+    if (!flushSave()) {
+      event.target.value = state.query;
+      return;
+    }
     state.dateFilter = null;
     state.query = event.target.value;
+    state.selectedId = null;
+    state.view = "list";
     syncFilterButtons();
-    renderCalendar();
-    renderList();
+    render();
   });
 
   elements.entryList.addEventListener("click", (event) => {
@@ -1451,24 +2679,32 @@ function bindEvents() {
   elements.calendarGrid.addEventListener("click", (event) => {
     const button = event.target.closest("[data-date]");
     if (!button) return;
-    showDate(button.dataset.date, { createIfEmpty: true });
+    showDate(button.dataset.date);
   });
+  elements.calendarGrid.addEventListener("keydown", handleCalendarKeydown);
 
   $$(".filter-item").forEach((button) => {
     button.addEventListener("click", () => {
+      if (!flushSave()) return;
       state.filter = button.dataset.filter;
       state.dateFilter = null;
+      state.selectedId = null;
+      state.view = "list";
       syncFilterButtons();
-      renderCalendar();
-      renderList();
+      render();
     });
   });
 
-  [elements.date, elements.title, elements.content, elements.tags].forEach((input) => {
+  [elements.date, elements.title, elements.tags].forEach((input) => {
     input.addEventListener("input", () => {
       updateEditorWordCount();
       scheduleSave();
     });
+  });
+  elements.content.addEventListener("input", (event) => {
+    recordEditorHistory(event);
+    updateEditorWordCount();
+    scheduleSave();
   });
 
   elements.form.addEventListener("submit", (event) => event.preventDefault());
@@ -1478,11 +2714,19 @@ function bindEvents() {
   elements.content.addEventListener("click", (event) => {
     const image = event.target.closest?.("img[data-media-kind]");
     if (!image || !elements.content.contains(image)) return;
-    const range = document.createRange();
-    range.selectNode(image);
-    setEditorCaret(range);
+    selectMediaGroup(image);
   });
   elements.content.addEventListener("keydown", (event) => {
+    if (isUndoShortcut(event)) {
+      event.preventDefault();
+      undoEditorChange();
+      return;
+    }
+    if (isRedoShortcut(event)) {
+      event.preventDefault();
+      redoEditorChange();
+      return;
+    }
     if (!["Backspace", "Delete"].includes(event.key)) return;
     const selection = window.getSelection();
     if (!selection?.rangeCount) return;
@@ -1500,13 +2744,21 @@ function bindEvents() {
     const credit = selectedNode.nextElementSibling?.classList.contains("media-credit")
       ? selectedNode.nextElementSibling
       : null;
+    const deleteRange = document.createRange();
+    deleteRange.setStartBefore(selectedNode);
+    deleteRange.setEndAfter(credit || selectedNode);
+    setEditorCaret(deleteRange);
+    if (executeEditorCommand("delete", null, "deleteContent")) {
+      captureEditorRange();
+      return;
+    }
     credit?.remove();
     selectedNode.remove();
     const nextRange = document.createRange();
     nextRange.setStart(parent, Math.min(offset, parent.childNodes.length));
     nextRange.collapse(true);
     setEditorCaret(nextRange);
-    notifyEditorChanged();
+    notifyEditorChanged("deleteContent");
   });
   document.addEventListener("selectionchange", () => {
     if (document.activeElement === elements.content) captureEditorRange();
@@ -1617,7 +2869,12 @@ function bindEvents() {
     const richText = event.clipboardData?.getData("text/html") || "";
     if (plainText || richText) {
       event.preventDefault();
-      insertTextAtCaret(plainText || contentToText(richText, "html"));
+      try {
+        if (richText && insertClipboardHtmlAtCaret(richText)) return;
+        insertTextAtCaret(plainText || contentToText(richText, "html"), "insertFromPaste");
+      } catch (error) {
+        showStorageError(error);
+      }
     }
   });
   elements.content.addEventListener("dragover", (event) => {
@@ -1646,7 +2903,12 @@ function bindEvents() {
     if (imageFiles.length) {
       insertImageFiles(imageFiles);
     } else {
-      insertTextAtCaret(plainText || contentToText(richText, "html"));
+      try {
+        if (richText && insertClipboardHtmlAtCaret(richText, "insertFromDrop")) return;
+        insertTextAtCaret(plainText || contentToText(richText, "html"), "insertFromDrop");
+      } catch (error) {
+        showStorageError(error);
+      }
     }
   });
 
@@ -1691,12 +2953,8 @@ function bindEvents() {
     }
     state.isDirty = false;
     state.saveFailed = false;
-    state.selectedId = searchEntries(
-      journalStore.getAll(),
-      state.query,
-      state.filter,
-      state.dateFilter,
-    )[0]?.id || null;
+    state.selectedId = null;
+    state.view = "list";
     render();
     showToast("日记已删除");
   });
@@ -1714,27 +2972,42 @@ function bindEvents() {
   });
 
   document.addEventListener("keydown", (event) => {
-    const modifier = event.metaKey || event.ctrlKey;
-    if (modifier && event.key.toLowerCase() === "k") {
+    if (splashState.phase !== "hidden") return;
+    if (isPrimaryShortcut(event, "s")) {
       event.preventDefault();
-      elements.search.focus();
+      saveCurrentEntry();
+      return;
     }
-    if (modifier && event.key.toLowerCase() === "n") {
+    if ($("dialog[open]")) return;
+    if (event.key === "Escape" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (state.view === "editor") {
+        if (!flushSave()) return;
+        event.preventDefault();
+        state.selectedId = null;
+        state.view = "list";
+        render();
+        requestAnimationFrame(() => elements.listTitle.focus?.());
+        return;
+      }
+      if (state.view === "list") {
+        event.preventDefault();
+        if (goHome()) requestAnimationFrame(() => $("#brand-button").focus());
+        return;
+      }
+    }
+    if (isPrimaryShortcut(event, "k") || isPrimaryShortcut(event, "f")) {
+      event.preventDefault();
+      focusDiarySearch();
+      return;
+    }
+    if (isPrimaryShortcut(event, "n")) {
       event.preventDefault();
       createEntry();
-    }
-    if (modifier && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      if (!flushSave()) return;
-      renderStats();
-      renderCalendar();
-      renderList();
-      showToast("日记已保存");
     }
   });
 
   window.addEventListener("beforeunload", (event) => {
-    if (flushSave()) return;
+    if (flushAll()) return;
     event.preventDefault();
     event.returnValue = "";
   });
@@ -1742,14 +3015,20 @@ function bindEvents() {
 
 function initialize() {
   initializeTheme();
-  $("#daily-prompt").textContent = prompts[new Date().getDay()];
+  prepareSplash();
+  initializeShortcutHints();
+  initializeWritingPrompt();
+  initializeHomeWidgets();
   bindEvents();
-  const entries = journalStore.getAll();
-  const today = searchEntries(entries, "", "all", toDateKey())[0];
-  state.selectedId = today?.id || searchEntries(entries, "")[0]?.id || null;
+  state.view = "home";
+  state.selectedId = null;
+  state.dateFilter = null;
+  state.homeDate = toDateKey();
   render();
+  splashState.appReady = true;
 
   const isNativeApp = document.documentElement.classList.contains("native-app");
+  startSplashClock();
   if (!isNativeApp && "serviceWorker" in navigator && location.protocol !== "file:") {
     const isLocalDevelopment = ["localhost", "127.0.0.1"].includes(location.hostname);
     window.addEventListener("load", () => {
@@ -1764,17 +3043,93 @@ function initialize() {
   }
 }
 
-window.dayleafNativePrepareToClose = flushSave;
+window.dayleafNativePrepareToClose = flushAll;
 window.dayleafNativeImportBackup = importNativeBackup;
 window.dayleafNativeVerifyBackup = verifyNativeBackup;
+window.dayleafNativeDidShow = startSplashClock;
+window.dayleafForceFinishSplash = finishSplash;
+window.dayleafCommands = {
+  focusSearch: focusDiarySearch,
+  newEntry: () => splashState.phase === "hidden" && Boolean(createEntry()),
+  redo: () => editorOwnsFocus() && redoEditorChange(),
+  save: saveCurrentEntry,
+  undo: () => editorOwnsFocus() && undoEditorChange(),
+};
 window.dayleafTesting = {
+  getDashboardState() {
+    return {
+      view: state.view,
+      selectedId: state.selectedId,
+      dateFilter: state.dateFilter,
+      prompt: state.promptText,
+      promptIndex: state.promptIndex,
+      promptCount: WRITING_PROMPTS.length,
+      promptDraft: elements.promptAnswer.value,
+      journalPanelInert: elements.journalPanel.hasAttribute("inert"),
+      editorInert: elements.editorPane.hasAttribute("inert"),
+      entryCount: journalStore.getAll().length,
+      homeWidgets: { ...state.homeWidgets },
+      widgetLayout: elements.workspace.dataset.widgetLayout,
+      widgetStartVisible: !elements.homeWidgetStart.hidden,
+      widgetEndVisible: !elements.homeWidgetEnd.hidden,
+      music: {
+        phase: state.music.phase,
+        running: state.music.running,
+        playing: state.music.playing,
+        title: state.music.title,
+      },
+      breathing: {
+        running: state.breathing.running,
+        remainingMs: breathingRemainingMs(),
+      },
+    };
+  },
+  getSplashState,
+  getShortcutProfile() {
+    return {
+      modifier: shortcutModifierLabel(platformName()),
+      platform: platformName(),
+    };
+  },
   sanitizeRichContent,
   failNextSave() {
     state.forceNextSaveFailure = true;
   },
+  async setHomeWidget(id, enabled) {
+    return enabled ? enableHomeWidget(id) : disableHomeWidget(id);
+  },
+  async performMusicAction(action) {
+    await performMusicAction(action);
+    return state.music.phase;
+  },
+  async refreshMusic() {
+    await refreshMusicStatus({ schedule: false, allowHidden: true });
+    return state.music.phase;
+  },
+  toggleBreathing() {
+    toggleBreathingTimer();
+    return state.breathing.running;
+  },
+  async getNativeWidgetSmokeState() {
+    return requestNativeWidget("testing", "state");
+  },
+  openDate(date) {
+    showDate(date);
+    return state.view;
+  },
+  submitPromptAnswer(answer) {
+    elements.promptAnswer.value = String(answer || "").slice(0, 800);
+    elements.promptAnswer.dispatchEvent(new Event("input", { bubbles: true }));
+    return Boolean(createPromptEntry());
+  },
   insertEmoji(emoji) {
     state.mediaEntryId = state.selectedId;
     return insertTextAtCaret(emoji);
+  },
+  pasteRichContent(html) {
+    state.mediaEntryId = state.selectedId;
+    captureEditorRange();
+    return insertClipboardHtmlAtCaret(html);
   },
   insertMediaDataUrl(dataUrl, kind = "image", metadata = {}) {
     state.mediaEntryId = state.selectedId;

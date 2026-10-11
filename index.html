@@ -8,13 +8,43 @@
       name="description"
       content="日叶 Dayleaf — 一款安静、私密、本地优先的日记应用。"
     />
+    <script>
+      try {
+        const preferences = JSON.parse(localStorage.getItem("dayleaf.preferences.v1") || "{}");
+        const theme = preferences.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.dataset.theme = theme;
+        document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#1e211d" : "#f4f0e7";
+      } catch {}
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/src/styles.css" />
     <title>日叶 Dayleaf</title>
   </head>
-  <body>
-    <div class="app-shell">
+  <body class="splash-active">
+    <div
+      class="splash-screen"
+      id="splash-screen"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      aria-labelledby="splash-message"
+      aria-describedby="splash-source"
+    >
+      <div class="splash-glow splash-glow-one" aria-hidden="true"></div>
+      <div class="splash-glow splash-glow-two" aria-hidden="true"></div>
+      <div class="splash-content">
+        <span class="splash-brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M25.7 5.1C18.4 5.5 11 9 7.5 14.9c-2.1 3.6-1.8 7.1-.2 9.7 4.4-7.8 9.3-11.7 14.7-14.2-4.6 3.7-8.4 7.9-11.2 13.2 2.9.8 6.1-.1 8.5-2.7 4.1-4.5 4.7-10.7 6.4-15.8Z"/></svg>
+        </span>
+        <p class="splash-name">日叶 <span>Dayleaf</span></p>
+        <blockquote id="splash-message">允许今天只是今天，不必立刻成为答案。</blockquote>
+        <p class="splash-source" id="splash-source">日叶 · 今日寄语</p>
+        <div class="splash-progress" aria-hidden="true"><span></span></div>
+      </div>
+    </div>
+
+    <div class="app-shell" aria-hidden="true" inert>
       <header class="topbar">
         <button class="brand" id="brand-button" aria-label="返回今天">
           <span class="brand-mark" aria-hidden="true">
@@ -28,8 +58,15 @@
 
         <label class="search-box" for="search-input">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21 21-4.3-4.3m2.3-5.2A7.5 7.5 0 1 1 4 11.5a7.5 7.5 0 0 1 15 0Z"/></svg>
-          <input id="search-input" type="search" placeholder="搜索回忆…" autocomplete="off" />
-          <kbd>⌘ K</kbd>
+          <input
+            id="search-input"
+            type="search"
+            placeholder="搜索回忆…"
+            autocomplete="off"
+            aria-label="搜索日记"
+            aria-keyshortcuts="Meta+K Control+K Meta+F Control+F"
+          />
+          <kbd id="search-shortcut-label">⌘ K</kbd>
         </label>
 
         <div class="topbar-actions">
@@ -43,21 +80,37 @@
           <button class="icon-button" id="backup-button" aria-label="备份与恢复" title="备份与恢复">
             <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 16v3h14v-3"/></svg>
           </button>
-          <button class="primary-button compact" id="new-entry-button">
+          <button
+            class="primary-button compact"
+            id="new-entry-button"
+            aria-keyshortcuts="Meta+N Control+N"
+          >
             <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
             写日记
           </button>
         </div>
       </header>
 
-      <main class="workspace">
+      <main class="workspace" id="workspace" data-view="home">
         <aside class="sidebar" id="sidebar">
+          <div class="dashboard-heading">
+            <div>
+              <span class="eyebrow">日期主页</span>
+              <h1 id="dashboard-date-title">今天</h1>
+              <p>先选一个日子，再慢慢展开那天的故事。</p>
+            </div>
+            <button class="widget-settings-button" id="widget-settings-button" type="button" aria-haspopup="dialog">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><path d="M17.5 14v7M14 17.5h7"/></svg>
+              添加小组件
+            </button>
+          </div>
+
           <section class="calendar-card">
             <div class="section-heading">
               <button class="icon-button subtle" id="previous-month" aria-label="上个月">
                 <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
               </button>
-              <h2 id="calendar-title"></h2>
+              <h2 id="calendar-title" aria-live="polite"></h2>
               <button class="icon-button subtle" id="next-month" aria-label="下个月">
                 <svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
               </button>
@@ -68,13 +121,31 @@
             <div class="calendar-grid" id="calendar-grid"></div>
           </section>
 
-          <section class="insight-card">
-            <div class="insight-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M8 18h8M9 22h6"/><path d="M8.4 14.5A7 7 0 1 1 15.6 14.5c-.9.6-1.3 1.4-1.4 2.5H9.8c-.1-1.1-.5-1.9-1.4-2.5Z"/></svg>
+          <section class="insight-card" aria-labelledby="prompt-heading">
+            <div class="insight-card-heading">
+              <div class="insight-label">
+                <span class="insight-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M8 18h8M9 22h6"/><path d="M8.4 14.5A7 7 0 1 1 15.6 14.5c-.9.6-1.3 1.4-1.4 2.5H9.8c-.1-1.1-.5-1.9-1.4-2.5Z"/></svg>
+                </span>
+                <span class="eyebrow" id="prompt-heading">写作提示</span>
+              </div>
+              <button class="prompt-shuffle" id="prompt-shuffle-button" type="button" aria-label="换一个写作提示" title="换一个问题">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h3.5c4.5 0 4.5 10 9 10H20"/><path d="m17 14 3 3-3 3M4 17h3.5c1.6 0 2.7-1.2 3.6-2.7M14.3 8.8c.7-1 1.4-1.8 2.2-1.8H20"/><path d="m17 4 3 3-3 3"/></svg>
+              </button>
             </div>
-            <div>
-              <span class="eyebrow">写作提示</span>
-              <p id="daily-prompt"></p>
+            <div class="insight-copy">
+              <p id="daily-prompt" aria-live="polite"></p>
+              <label class="prompt-answer-field" for="prompt-answer">
+                <span class="sr-only">回答这个写作提示</span>
+                <textarea id="prompt-answer" rows="2" maxlength="800" aria-describedby="daily-prompt" placeholder="在这里回答，一句话也可以…"></textarea>
+              </label>
+              <div class="prompt-actions">
+                <span id="prompt-draft-status">写给今天</span>
+                <button class="prompt-write-button" id="prompt-write-button" type="button" disabled>
+                  写进日记
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+              </div>
             </div>
           </section>
 
@@ -114,12 +185,53 @@
           </p>
         </aside>
 
-        <section class="journal-panel">
-          <div class="list-pane">
+        <aside class="home-widget-rail home-widget-rail-start" id="home-widget-start" aria-label="左侧主页小组件" aria-hidden="true" inert>
+          <section class="home-widget reflection-widget" id="reflection-widget" hidden>
+            <div class="home-widget-heading">
+              <span class="home-widget-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg></span>
+              <span class="eyebrow">往年今日</span>
+            </div>
+            <strong id="reflection-count">还没有往年记录</strong>
+            <p id="reflection-description">日子积累起来后，这里会替你打开同一天的旧时光。</p>
+            <button class="widget-link-button" id="reflection-open-button" type="button" hidden>查看这些日记</button>
+          </section>
+        </aside>
+
+        <aside class="home-widget-rail home-widget-rail-end" id="home-widget-end" aria-label="右侧主页小组件" aria-hidden="true" inert>
+          <section class="home-widget music-widget" id="music-widget" hidden>
+            <div class="home-widget-heading">
+              <span class="home-widget-icon music" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg></span>
+              <div><span class="eyebrow">音乐陪伴</span><small id="music-connection-status">等待连接</small></div>
+            </div>
+            <div class="music-now-playing" aria-live="polite" aria-atomic="true">
+              <strong id="music-track-title">让一段音乐陪你写作</strong>
+              <span id="music-track-artist">仅在你开启后连接 macOS 音乐</span>
+            </div>
+            <div class="music-controls">
+              <button class="widget-control-button" id="music-open-button" type="button">打开音乐</button>
+              <button class="round-control" id="music-play-button" type="button" aria-label="播放音乐" disabled><svg class="music-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg></button>
+              <button class="round-control" id="music-next-button" type="button" aria-label="下一首" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 10 7-10 7ZM18 5v14"/></svg></button>
+            </div>
+          </section>
+
+          <section class="home-widget breathing-widget" id="breathing-widget" hidden>
+            <div class="home-widget-heading">
+              <span class="home-widget-icon breath" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h4l2-5 4 10 2-5h4"/></svg></span>
+              <span class="eyebrow">静心一分钟</span>
+            </div>
+            <div class="breathing-visual" id="breathing-visual" aria-hidden="true"><span></span></div>
+            <strong id="breathing-label">准备好时，慢慢呼吸</strong>
+            <span class="breathing-time" id="breathing-time">01:00</span>
+            <button class="widget-link-button" id="breathing-toggle-button" type="button">开始静心</button>
+          </section>
+        </aside>
+
+        <section class="journal-panel" id="journal-panel" aria-hidden="true" inert>
+          <div class="list-pane" id="list-pane">
             <div class="list-header">
               <div>
                 <span class="eyebrow">你的时光</span>
-                <h1 id="list-title">所有日记</h1>
+                <h1 id="list-title" tabindex="-1">所有日记</h1>
               </div>
               <div class="list-header-actions">
                 <button class="date-filter-clear" id="clear-date-filter" hidden>查看全部</button>
@@ -199,6 +311,7 @@
                   contenteditable="true"
                   role="textbox"
                   aria-multiline="true"
+                  aria-keyshortcuts="Meta+X Control+X Meta+C Control+C Meta+V Control+V Meta+A Control+A Meta+Z Control+Z Meta+Shift+Z Control+Shift+Z Control+Y"
                   data-placeholder="今天发生了什么？&#10;&#10;不必写得完整，只要真实就好。"
                   spellcheck="true"
                 ></div>
@@ -215,6 +328,43 @@
         </section>
       </main>
     </div>
+
+    <dialog class="dialog widget-settings-dialog" id="widget-settings-dialog" aria-labelledby="widget-settings-title">
+      <form method="dialog">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">由你决定连接什么</span>
+            <h2 id="widget-settings-title" tabindex="-1">主页小组件</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭小组件设置">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <p class="widget-settings-intro">所有小组件默认关闭。Dayleaf 只会在你明确开启后访问对应能力，关闭后立即停止读取。</p>
+        <div class="widget-setting-list">
+          <article class="widget-setting-item">
+            <div class="widget-setting-copy"><strong>往年今日</strong><p>只在本机统计同月同日的日记数量，不显示正文，也不需要系统权限。</p></div>
+            <button class="widget-permission-button" type="button" data-widget-enable="reflection" aria-label="开启往年今日小组件">开启</button>
+            <button class="widget-disable-button" type="button" data-widget-disable="reflection" aria-label="关闭往年今日小组件" hidden>关闭</button>
+          </article>
+          <article class="widget-setting-item">
+            <div class="widget-setting-copy">
+              <strong>音乐陪伴</strong>
+              <p>读取当前曲名并发送播放、暂停和下一首控制；不会读取资料库或播放历史。</p>
+              <small id="music-permission-detail">仅支持独立 macOS 版，开启时系统可能询问“自动化”权限。</small>
+            </div>
+            <button class="widget-permission-button" type="button" data-widget-enable="music" aria-label="允许并开启音乐陪伴小组件">允许并开启</button>
+            <button class="widget-disable-button" type="button" data-widget-disable="music" aria-label="关闭音乐陪伴小组件" hidden>关闭</button>
+          </article>
+          <article class="widget-setting-item">
+            <div class="widget-setting-copy"><strong>静心一分钟</strong><p>本地呼吸计时，不联网、不调用其他软件，也不需要系统权限。</p></div>
+            <button class="widget-permission-button" type="button" data-widget-enable="breathing" aria-label="开启静心一分钟小组件">开启</button>
+            <button class="widget-disable-button" type="button" data-widget-disable="breathing" aria-label="关闭静心一分钟小组件" hidden>关闭</button>
+          </article>
+        </div>
+        <p class="widget-settings-footnote">音乐权限可随时在“系统设置 → 隐私与安全性 → 自动化”中修改。</p>
+      </form>
+    </dialog>
 
     <dialog id="backup-dialog" class="dialog">
       <form method="dialog">
@@ -360,6 +510,20 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script>
+      window.__dayleafSplashFallback = window.setTimeout(() => {
+        if (typeof window.dayleafForceFinishSplash === "function") {
+          window.dayleafForceFinishSplash();
+          return;
+        }
+        const splash = document.querySelector("#splash-screen");
+        splash?.setAttribute("hidden", "");
+        document.body.classList.remove("splash-active", "splash-revealing");
+        const appShell = document.querySelector(".app-shell");
+        appShell?.removeAttribute("aria-hidden");
+        appShell?.removeAttribute("inert");
+      }, 4500);
+    </script>
     <script type="module" src="/src/app.js"></script>
   </body>
 </html>
