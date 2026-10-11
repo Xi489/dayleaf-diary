@@ -2,10 +2,7 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET="${APP_DIR}/Dayleaf.app"
-CONTENTS="${TARGET}/Contents"
-MACOS_DIR="${CONTENTS}/MacOS"
-RESOURCES_DIR="${CONTENTS}/Resources"
+ARCHIVE_TARGET="${APP_DIR}/dist/Dayleaf-mac.zip"
 SWIFT_SOURCE="${APP_DIR}/native/DayleafApp.swift"
 INFO_PLIST="${APP_DIR}/native/Info.plist"
 WEB_BUNDLE="${APP_DIR}/tmp/native/Dayleaf.html"
@@ -30,9 +27,15 @@ if [ ! -f "${ICON}" ]; then
   exit 1
 fi
 
+STAGING_ROOT="$(mktemp -d /private/tmp/dayleaf-native-build.XXXXXX)"
+BUILD_TARGET="${STAGING_ROOT}/Dayleaf.app"
+CONTENTS="${BUILD_TARGET}/Contents"
+MACOS_DIR="${CONTENTS}/MacOS"
+RESOURCES_DIR="${CONTENTS}/Resources"
+trap 'rm -rf "${STAGING_ROOT}"' EXIT
+
 node "${APP_DIR}/scripts/bundle_native.mjs"
 
-rm -rf "${TARGET}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${MODULE_CACHE}"
 
 "${SWIFTC}" \
@@ -51,10 +54,20 @@ cp "${INFO_PLIST}" "${CONTENTS}/Info.plist"
 cp "${WEB_BUNDLE}" "${RESOURCES_DIR}/Dayleaf.html"
 cp "${ICON}" "${RESOURCES_DIR}/Dayleaf.icns"
 
-/usr/bin/xattr -cr "${TARGET}"
-/usr/bin/codesign --force --deep --sign - "${TARGET}" >/dev/null
-/usr/bin/xattr -cr "${TARGET}"
+/usr/bin/xattr -cr "${BUILD_TARGET}"
+/usr/bin/codesign --force --deep --sign - "${BUILD_TARGET}" >/dev/null
+/usr/bin/codesign --verify --deep --strict "${BUILD_TARGET}"
 
-echo "Created native app: ${TARGET}"
+mkdir -p "$(dirname "${ARCHIVE_TARGET}")"
+rm -f "${ARCHIVE_TARGET}"
+/usr/bin/ditto -c -k --keepParent --norsrc "${BUILD_TARGET}" "${ARCHIVE_TARGET}"
+
+VERIFY_ROOT="${STAGING_ROOT}/verify"
+mkdir -p "${VERIFY_ROOT}"
+/usr/bin/ditto -x -k "${ARCHIVE_TARGET}" "${VERIFY_ROOT}"
+/usr/bin/xattr -cr "${VERIFY_ROOT}/Dayleaf.app"
+/usr/bin/codesign --verify --deep --strict "${VERIFY_ROOT}/Dayleaf.app"
+
+echo "Created signed app archive: ${ARCHIVE_TARGET}"
 echo "Architecture: ${ARCH}"
 echo "Interface: embedded WKWebView (no browser or local server)"

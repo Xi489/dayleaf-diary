@@ -19,9 +19,9 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.7.0</string>
+  <string>0.8.0</string>
   <key>CFBundleVersion</key>
-  <string>7</string>
+  <string>8</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.lifestyle</string>
   <key>LSMinimumSystemVersion</key>
@@ -31,7 +31,7 @@
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>仅在你开启“音乐陪伴”后，日叶会读取 Music 当前播放信息并响应播放控制；不会读取资料库、播放历史或上传信息。</string>
+  <string>仅在你选择并开启支持完整联动的音乐播放器后，日叶会读取当前曲目并响应播放控制；不会读取资料库、播放历史或上传信息。</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Dayleaf contributors</string>
   <key>NSPrincipalClass</key>

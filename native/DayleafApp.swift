@@ -17,10 +17,52 @@ private func isTrustedDayleafURL(_ url: URL) -> Bool {
         (url.port == nil || url.port == 443)
 }
 
+private struct DayleafMusicProvider {
+    let id: String
+    let displayName: String
+    let bundleIdentifiers: [String]
+    let fallbackPaths: [String]
+    let mode: String
+
+    var capabilities: [String: Bool] {
+        let full = mode == "full"
+        return ["openApp": true, "nowPlaying": full, "playPause": full, "next": full]
+    }
+}
+
 final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
+    private static let musicProviders: [String: DayleafMusicProvider] = [
+        "appleMusic": DayleafMusicProvider(
+            id: "appleMusic",
+            displayName: "Apple Music",
+            bundleIdentifiers: ["com.apple.Music"],
+            fallbackPaths: ["/System/Applications/Music.app"],
+            mode: "full"
+        ),
+        "netease": DayleafMusicProvider(
+            id: "netease",
+            displayName: "网易云音乐",
+            bundleIdentifiers: ["com.netease.163music"],
+            fallbackPaths: ["/Applications/NeteaseMusic.app", "~/Applications/NeteaseMusic.app"],
+            mode: "launchOnly"
+        ),
+        "qqMusic": DayleafMusicProvider(
+            id: "qqMusic",
+            displayName: "QQ 音乐",
+            bundleIdentifiers: ["com.tencent.QQMusicMac", "com.tencent.QQMusic"],
+            fallbackPaths: [
+                "/Applications/QQMusic.app", "/Applications/QQ音乐.app",
+                "~/Applications/QQMusic.app", "~/Applications/QQ音乐.app",
+            ],
+            mode: "launchOnly"
+        ),
+    ]
+
     private let isSmokeTest: Bool
     private let queue = DispatchQueue(label: "com.dayleaf.diary.music-bridge", qos: .userInitiated)
     private var smokeCallCount = 0
+    private var smokeLastProvider = ""
+    private var smokeOpenedProviders = Set<String>()
 
     init(isSmokeTest: Bool) {
         self.isSmokeTest = isSmokeTest
@@ -30,8 +72,54 @@ final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
         ["ok": ok, "code": code, "data": data]
     }
 
-    private func runningMusicApplication() -> NSRunningApplication? {
-        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").first
+    private func providerData(
+        _ provider: DayleafMusicProvider,
+        installed: Bool,
+        running: Bool,
+        authorization: String
+    ) -> [String: Any] {
+        [
+            "provider": provider.id,
+            "displayName": provider.displayName,
+            "installed": installed,
+            "running": running,
+            "authorization": authorization,
+            "mode": provider.mode,
+            "capabilities": provider.capabilities,
+        ]
+    }
+
+    private func fallbackURLs(for provider: DayleafMusicProvider) -> [URL] {
+        provider.fallbackPaths.map { path in
+            guard path.hasPrefix("~/") else { return URL(fileURLWithPath: path) }
+            return FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(String(path.dropFirst(2)))
+        }
+    }
+
+    private func applicationURL(for provider: DayleafMusicProvider) -> URL? {
+        for bundleIdentifier in provider.bundleIdentifiers {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+                return url
+            }
+        }
+        for url in fallbackURLs(for: provider) where FileManager.default.fileExists(atPath: url.path) {
+            return url
+        }
+        return nil
+    }
+
+    private func runningApplication(for provider: DayleafMusicProvider) -> NSRunningApplication? {
+        for bundleIdentifier in provider.bundleIdentifiers {
+            if let application = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
+                return application
+            }
+        }
+        let knownPaths = Set(fallbackURLs(for: provider).map { $0.standardizedFileURL.path })
+        return NSWorkspace.shared.runningApplications.first { application in
+            guard let bundlePath = application.bundleURL?.standardizedFileURL.path else { return false }
+            return knownPaths.contains(bundlePath)
+        }
     }
 
     private func permissionStatus(for application: NSRunningApplication, ask: Bool) -> OSStatus {
@@ -46,11 +134,21 @@ final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
         return (result, error)
     }
 
-    private func musicStatus(askForPermission: Bool) -> [String: Any] {
-        guard let application = runningMusicApplication() else {
-            return reply(true, code: "notRunning", data: [
-                "authorization": "unknown", "running": false, "playing": false,
-            ])
+    private func fullMusicStatus(
+        for provider: DayleafMusicProvider,
+        askForPermission: Bool
+    ) -> [String: Any] {
+        guard provider.id == "appleMusic" else {
+            return reply(false, code: "unsupportedAction")
+        }
+        let installed = applicationURL(for: provider) != nil
+        guard let application = runningApplication(for: provider) else {
+            return reply(true, code: "notRunning", data: providerData(
+                provider,
+                installed: installed,
+                running: false,
+                authorization: "unknown"
+            ).merging(["playing": false], uniquingKeysWith: { current, _ in current }))
         }
         let permission = permissionStatus(for: application, ask: askForPermission)
         if permission == errAEEventWouldRequireUserConsent {
@@ -63,7 +161,7 @@ final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
             return reply(false, code: "permissionError")
         }
         let source = """
-        tell application "Music"
+        tell application id "com.apple.Music"
           set isPlaying to (player state is playing)
           try
             set trackName to name of current track
@@ -79,36 +177,54 @@ final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
         guard error == nil, let result else {
             return reply(false, code: "commandFailed")
         }
-        let playing = result.atIndex(1)?.booleanValue ?? false
-        let title = result.atIndex(2)?.stringValue ?? ""
-        let artist = result.atIndex(3)?.stringValue ?? ""
-        return reply(true, data: [
-            "authorization": "authorized",
-            "running": true,
-            "playing": playing,
-            "title": String(title.prefix(160)),
-            "artist": String(artist.prefix(160)),
-        ])
+        var data = providerData(provider, installed: true, running: true, authorization: "authorized")
+        data["playing"] = result.atIndex(1)?.booleanValue ?? false
+        data["title"] = String((result.atIndex(2)?.stringValue ?? "").prefix(160))
+        data["artist"] = String((result.atIndex(3)?.stringValue ?? "").prefix(160))
+        return reply(true, data: data)
     }
 
-    private func handleMusic(action: String) -> [String: Any] {
+    private func handleSmokeMusic(action: String, provider: DayleafMusicProvider) -> [String: Any] {
+        smokeCallCount += 1
+        smokeLastProvider = provider.id
+        switch action {
+        case "openApp":
+            smokeOpenedProviders.insert(provider.id)
+            return reply(true, data: providerData(
+                provider,
+                installed: true,
+                running: true,
+                authorization: provider.mode == "full" ? "unknown" : "notNeeded"
+            ))
+        case "authorize" where provider.mode == "full",
+             "status" where provider.mode == "full":
+            var data = providerData(provider, installed: true, running: true, authorization: "authorized")
+            data["playing"] = true
+            data["title"] = "无痕测试曲目"
+            data["artist"] = "Dayleaf Fake Music"
+            return reply(true, data: data)
+        case "status":
+            return reply(true, data: providerData(
+                provider,
+                installed: true,
+                running: smokeOpenedProviders.contains(provider.id),
+                authorization: "notNeeded"
+            ))
+        case "playPause" where provider.mode == "full",
+             "next" where provider.mode == "full":
+            return reply(true)
+        default:
+            return reply(false, code: "unsupportedAction")
+        }
+    }
+
+    private func handleMusic(action: String, provider: DayleafMusicProvider) -> [String: Any] {
         if isSmokeTest {
-            smokeCallCount += 1
-            switch action {
-            case "authorize", "status":
-                return reply(true, data: [
-                    "authorization": "authorized", "running": true, "playing": true,
-                    "title": "无痕测试曲目", "artist": "Dayleaf Fake Music",
-                ])
-            case "playPause", "next", "openApp":
-                return reply(true)
-            default:
-                return reply(false, code: "unsupportedAction")
-            }
+            return handleSmokeMusic(action: action, provider: provider)
         }
 
         if action == "openApp" {
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Music") else {
+            guard let url = applicationURL(for: provider) else {
                 return reply(false, code: "appMissing")
             }
             DispatchQueue.main.async {
@@ -117,21 +233,40 @@ final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
                 configuration.addsToRecentItems = false
                 NSWorkspace.shared.openApplication(at: url, configuration: configuration)
             }
-            return reply(true)
+            return reply(true, data: providerData(
+                provider,
+                installed: true,
+                running: true,
+                authorization: provider.mode == "full" ? "unknown" : "notNeeded"
+            ))
         }
 
+        if action == "status" && provider.mode == "launchOnly" {
+            guard applicationURL(for: provider) != nil else {
+                return reply(false, code: "appMissing")
+            }
+            return reply(true, data: providerData(
+                provider,
+                installed: true,
+                running: runningApplication(for: provider) != nil,
+                authorization: "notNeeded"
+            ))
+        }
+
+        guard provider.mode == "full" else {
+            return reply(false, code: "unsupportedAction")
+        }
         if action == "authorize" {
-            guard runningMusicApplication() != nil else {
+            guard runningApplication(for: provider) != nil else {
                 return reply(false, code: "notRunning")
             }
-            return musicStatus(askForPermission: true)
+            return fullMusicStatus(for: provider, askForPermission: true)
         }
-
         if action == "status" {
-            return musicStatus(askForPermission: false)
+            return fullMusicStatus(for: provider, askForPermission: false)
         }
 
-        guard let application = runningMusicApplication() else {
+        guard let application = runningApplication(for: provider) else {
             return reply(false, code: "notRunning")
         }
         let permission = permissionStatus(for: application, ask: false)
@@ -140,8 +275,8 @@ final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
         guard permission == noErr else { return reply(false, code: "permissionError") }
         let source: String
         switch action {
-        case "playPause": source = "tell application \"Music\" to playpause"
-        case "next": source = "tell application \"Music\" to next track"
+        case "playPause": source = "tell application id \"com.apple.Music\" to playpause"
+        case "next": source = "tell application id \"com.apple.Music\" to next track"
         default: return reply(false, code: "unsupportedAction")
         }
         let (_, error) = executeMusicScript(source)
@@ -166,20 +301,26 @@ final class DayleafWidgetBridge: NSObject, WKScriptMessageHandlerWithReply {
 
         if isSmokeTest && capability == "testing" && action == "state" {
             queue.async {
-                let result = self.reply(true, data: ["callCount": self.smokeCallCount])
+                let result = self.reply(true, data: [
+                    "callCount": self.smokeCallCount,
+                    "lastProvider": self.smokeLastProvider,
+                    "openedProviders": Array(self.smokeOpenedProviders).sorted(),
+                ])
                 DispatchQueue.main.async { replyHandler(result, nil) }
             }
             return
         }
 
         guard capability == "music",
-              ["authorize", "status", "playPause", "next", "openApp"].contains(action)
+              ["authorize", "status", "playPause", "next", "openApp"].contains(action),
+              let providerID = body["provider"] as? String,
+              let provider = Self.musicProviders[providerID]
         else {
             replyHandler(nil, "Unsupported Dayleaf widget capability")
             return
         }
         queue.async {
-            let result = self.handleMusic(action: action)
+            let result = self.handleMusic(action: action, provider: provider)
             DispatchQueue.main.async { replyHandler(result, nil) }
         }
     }
@@ -640,6 +781,8 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
           initial.homeWidgets?.reflection === false &&
           initial.homeWidgets?.music === false &&
           initial.homeWidgets?.breathing === false &&
+          initial.music?.provider === "appleMusic" &&
+          initial.music?.mode === "full" &&
           initial.widgetLayout === "none" &&
           initial.widgetStartVisible === false &&
           initial.widgetEndVisible === false &&
@@ -669,6 +812,43 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
           bridgeAfterMusic?.data?.callCount >= 4;
         await window.dayleafTesting?.setHomeWidget?.("music", false);
 
+        const neteaseSelected = window.dayleafTesting?.setMusicProvider?.("netease") === true;
+        const neteaseEnabled = await window.dayleafTesting?.setHomeWidget?.("music", true);
+        await window.dayleafTesting?.refreshMusic?.();
+        const neteaseState = window.dayleafTesting?.getDashboardState?.() || {};
+        const bridgeBeforeUnsupported = await window.dayleafTesting?.getNativeWidgetSmokeState?.();
+        await window.dayleafTesting?.performMusicAction?.("playPause");
+        const bridgeAfterUnsupported = await window.dayleafTesting?.getNativeWidgetSmokeState?.();
+        const neteaseLaunchOnlyWorks = neteaseSelected === true &&
+          neteaseEnabled === true &&
+          neteaseState.music?.provider === "netease" &&
+          neteaseState.music?.mode === "launchOnly" &&
+          neteaseState.music?.phase === "limited" &&
+          neteaseState.music?.running === true &&
+          neteaseState.music?.title === "" &&
+          neteaseState.music?.playButtonHidden === true &&
+          neteaseState.music?.nextButtonHidden === true &&
+          bridgeAfterUnsupported?.data?.lastProvider === "netease";
+        const unsupportedControlNotSent = bridgeBeforeUnsupported?.data?.callCount ===
+          bridgeAfterUnsupported?.data?.callCount;
+        await window.dayleafTesting?.setHomeWidget?.("music", false);
+
+        const qqMusicSelected = window.dayleafTesting?.setMusicProvider?.("qqMusic") === true;
+        const qqMusicEnabled = await window.dayleafTesting?.setHomeWidget?.("music", true);
+        await window.dayleafTesting?.refreshMusic?.();
+        const qqMusicState = window.dayleafTesting?.getDashboardState?.() || {};
+        const bridgeAfterQQMusic = await window.dayleafTesting?.getNativeWidgetSmokeState?.();
+        const qqMusicLaunchOnlyWorks = qqMusicSelected === true &&
+          qqMusicEnabled === true &&
+          qqMusicState.music?.provider === "qqMusic" &&
+          qqMusicState.music?.mode === "launchOnly" &&
+          qqMusicState.music?.phase === "limited" &&
+          qqMusicState.music?.playButtonHidden === true &&
+          bridgeAfterQQMusic?.data?.lastProvider === "qqMusic" &&
+          bridgeAfterQQMusic?.data?.openedProviders?.includes("qqMusic") === true;
+        await window.dayleafTesting?.setHomeWidget?.("music", false);
+        const providerReset = window.dayleafTesting?.setMusicProvider?.("appleMusic") === true;
+
         const breathingEnabled = await window.dayleafTesting?.setHomeWidget?.("breathing", true);
         const breathingStarted = window.dayleafTesting?.toggleBreathing?.() === true;
         await new Promise((resolve) => setTimeout(resolve, 350));
@@ -688,19 +868,25 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
           finalState.widgetLayout === "none" &&
           finalState.widgetStartVisible === false &&
           finalState.widgetEndVisible === false &&
-          finalState.breathing?.running === false;
+          finalState.breathing?.running === false &&
+          finalState.music?.provider === "appleMusic";
 
         return JSON.stringify({
           defaultOff,
           reflectionWorks,
           musicFakeWorks,
           musicBridgeCalled,
+          neteaseLaunchOnlyWorks,
+          qqMusicLaunchOnlyWorks,
+          unsupportedControlNotSent,
+          providerReset,
           breathingWorks,
           disablingStopsWidgets,
           musicEnabledValue: musicEnabled,
           musicState,
           bridgeBefore,
-          bridgeAfterMusic
+          bridgeAfterMusic,
+          bridgeAfterQQMusic
         });
         """
 
@@ -722,7 +908,8 @@ final class DayleafAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     }
                     let required = [
                         "defaultOff", "reflectionWorks", "musicFakeWorks",
-                        "musicBridgeCalled", "breathingWorks", "disablingStopsWidgets"
+                        "musicBridgeCalled", "neteaseLaunchOnlyWorks", "qqMusicLaunchOnlyWorks",
+                        "unsupportedControlNotSent", "providerReset", "breathingWorks", "disablingStopsWidgets"
                     ]
                     self.widgetSmokePassed = required.allSatisfy { state[$0] as? Bool == true }
                     print("DAYLEAF_WIDGET_SMOKE_STATE \(json)")

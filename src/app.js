@@ -75,13 +75,16 @@ const elements = {
   reflectionDescription: $("#reflection-description"),
   reflectionOpenButton: $("#reflection-open-button"),
   musicWidget: $("#music-widget"),
+  musicWidgetEyebrow: $("#music-widget-eyebrow"),
   musicConnectionStatus: $("#music-connection-status"),
   musicTrackTitle: $("#music-track-title"),
   musicTrackArtist: $("#music-track-artist"),
   musicOpenButton: $("#music-open-button"),
   musicPlayButton: $("#music-play-button"),
   musicNextButton: $("#music-next-button"),
+  musicSettingDescription: $("#music-setting-description"),
   musicPermissionDetail: $("#music-permission-detail"),
+  musicSettingsFootnote: $("#music-settings-footnote"),
   breathingWidget: $("#breathing-widget"),
   breathingVisual: $("#breathing-visual"),
   breathingLabel: $("#breathing-label"),
@@ -130,6 +133,27 @@ const PROMPT_DRAFT_STORAGE_KEY = "dayleaf.prompt-draft.v1";
 const LAST_PROMPT_INDEX_KEY = "lastWritingPromptIndex";
 const HOME_WIDGETS_KEY = "homeWidgets";
 const HOME_WIDGET_IDS = ["reflection", "music", "breathing"];
+const MUSIC_PROVIDER_KEY = "musicProvider";
+const MUSIC_PROVIDERS = Object.freeze({
+  appleMusic: Object.freeze({
+    name: "Apple Music",
+    mode: "full",
+    description: "读取当前曲名并发送播放、暂停和下一首控制；不会读取资料库或播放历史。",
+    permission: "完整联动会在开启时请求 macOS“自动化”权限。",
+  }),
+  netease: Object.freeze({
+    name: "网易云音乐",
+    mode: "launchOnly",
+    description: "从日叶一键打开网易云音乐，写作时快速回到你的歌单。",
+    permission: "当前 Mac 版未提供公开曲控接口；日叶不会申请辅助功能权限或模拟按键。",
+  }),
+  qqMusic: Object.freeze({
+    name: "QQ 音乐",
+    mode: "launchOnly",
+    description: "从日叶一键打开 QQ 音乐，播放操作留在播放器内完成。",
+    permission: "当前 Mac 版没有可依赖的公开曲控接口；日叶不会申请辅助功能权限或模拟按键。",
+  }),
+});
 const MAX_CUSTOM_STICKERS = 12;
 const MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_MEDIA_DATA_CHARACTERS = 3_200_000;
@@ -169,6 +193,9 @@ const state = {
   homeWidgets: { reflection: false, music: false, breathing: false },
   reflectionDates: [],
   music: {
+    provider: "appleMusic",
+    mode: "full",
+    capabilities: { openApp: true, nowPlaying: true, playPause: true, next: true },
     generation: 0,
     pollTimer: null,
     inFlight: false,
@@ -443,11 +470,24 @@ function normalizeHomeWidgets(value) {
   return Object.fromEntries(HOME_WIDGET_IDS.map((id) => [id, source[id] === true]));
 }
 
+function normalizeMusicProvider(value) {
+  return Object.hasOwn(MUSIC_PROVIDERS, value) ? value : "appleMusic";
+}
+
+function selectedMusicProvider() {
+  return MUSIC_PROVIDERS[state.music.provider] || MUSIC_PROVIDERS.appleMusic;
+}
+
+function defaultMusicCapabilities(mode = selectedMusicProvider().mode) {
+  const full = mode === "full";
+  return { openApp: true, nowPlaying: full, playPause: full, next: full };
+}
+
 function nativeWidgetHandler() {
   return window.webkit?.messageHandlers?.dayleafWidgets || null;
 }
 
-async function requestNativeWidget(capability, action, { timeoutMs = 3500 } = {}) {
+async function requestNativeWidget(capability, action, { timeoutMs = 3500, payload = {} } = {}) {
   const handler = nativeWidgetHandler();
   if (!handler?.postMessage) {
     return { ok: false, code: "unsupported", data: {} };
@@ -455,7 +495,7 @@ async function requestNativeWidget(capability, action, { timeoutMs = 3500 } = {}
   let timeoutId;
   try {
     const response = await Promise.race([
-      Promise.resolve(handler.postMessage({ version: 1, capability, action })),
+      Promise.resolve(handler.postMessage({ version: 1, capability, action, ...payload })),
       new Promise((resolve) => {
         timeoutId = setTimeout(() => resolve({ ok: false, code: "timeout", data: {} }), timeoutMs);
       }),
@@ -470,6 +510,13 @@ async function requestNativeWidget(capability, action, { timeoutMs = 3500 } = {}
   }
 }
 
+function requestMusicWidget(action, options = {}) {
+  return requestNativeWidget("music", action, {
+    ...options,
+    payload: { provider: state.music.provider },
+  });
+}
+
 function persistHomeWidgets(nextWidgets) {
   const previous = state.homeWidgets;
   state.homeWidgets = normalizeHomeWidgets(nextWidgets);
@@ -481,6 +528,27 @@ function persistHomeWidgets(nextWidgets) {
     showStorageError(error);
     return false;
   }
+}
+
+function selectMusicProvider(providerId) {
+  const provider = normalizeMusicProvider(providerId);
+  if (state.homeWidgets.music || state.music.authorizing || provider === state.music.provider) return false;
+  const previous = state.music.provider;
+  state.music.provider = provider;
+  state.music.mode = MUSIC_PROVIDERS[provider].mode;
+  state.music.capabilities = defaultMusicCapabilities(state.music.mode);
+  try {
+    journalStore.setPreference(MUSIC_PROVIDER_KEY, provider);
+  } catch (error) {
+    state.music.provider = previous;
+    state.music.mode = MUSIC_PROVIDERS[previous].mode;
+    state.music.capabilities = defaultMusicCapabilities(state.music.mode);
+    showStorageError(error);
+    return false;
+  }
+  clearMusicRuntime();
+  renderHomeWidgets();
+  return true;
 }
 
 function widgetLayout() {
@@ -522,26 +590,49 @@ function updateTextContent(element, value) {
   if (element.textContent !== value) element.textContent = value;
 }
 
+function applyMusicCapabilities(data = {}) {
+  const reportedMode = data.mode === "full" || data.mode === "launchOnly" ? data.mode : selectedMusicProvider().mode;
+  const defaults = defaultMusicCapabilities(reportedMode);
+  const reported = data.capabilities && typeof data.capabilities === "object" ? data.capabilities : {};
+  state.music.mode = reportedMode;
+  state.music.capabilities = Object.fromEntries(
+    Object.keys(defaults).map((key) => [key, typeof reported[key] === "boolean" ? reported[key] : defaults[key]]),
+  );
+}
+
 function renderMusicWidget() {
   const music = state.music;
+  const provider = selectedMusicProvider();
   const supported = Boolean(nativeWidgetHandler()?.postMessage);
+  const fullControl = music.mode === "full" && music.capabilities.nowPlaying;
   const statusText = {
     requesting: "正在等待系统允许",
     permission: "需要你的系统允许",
     denied: "自动化权限未允许",
     unavailable: "仅支持独立 macOS 版",
+    missing: `未找到${provider.name}`,
     timeout: "连接暂时没有回应",
     ready: music.running ? (music.playing ? "正在播放" : "已暂停") : "音乐尚未打开",
+    limited: music.running ? "播放器已打开" : "播放器尚未打开",
     idle: supported ? "等待连接" : "仅支持独立 macOS 版",
   }[music.phase] || "等待连接";
+  updateTextContent(elements.musicWidgetEyebrow, `${provider.name} · 音乐陪伴`);
   updateTextContent(elements.musicConnectionStatus, statusText);
-  updateTextContent(elements.musicTrackTitle, music.title || (supported ? "让一段音乐陪你写作" : "在 macOS 独立版中使用"));
-  updateTextContent(elements.musicTrackArtist, music.artist || (supported ? "打开音乐后，这里只显示当前曲目" : "网页版本不会访问本地软件"));
+  const fallbackTitle = music.phase === "missing"
+    ? `${provider.name} 尚未安装`
+    : (fullControl ? "让一段音乐陪你写作" : `让 ${provider.name} 陪你写作`);
+  const fallbackArtist = supported
+    ? (fullControl ? "打开音乐后，这里只显示当前曲目" : "播放和曲目信息保留在播放器内")
+    : "网页版本不会访问本地软件";
+  updateTextContent(elements.musicTrackTitle, music.title || fallbackTitle);
+  updateTextContent(elements.musicTrackArtist, music.artist || fallbackArtist);
   updateTextContent(elements.musicOpenButton, ["permission", "denied"].includes(music.phase)
     ? "重新允许"
-    : (music.running ? "前往音乐" : "打开音乐"));
-  elements.musicPlayButton.disabled = !music.running || music.phase !== "ready";
-  elements.musicNextButton.disabled = !music.running || music.phase !== "ready";
+    : (music.running ? `前往${provider.name}` : `打开${provider.name}`));
+  elements.musicPlayButton.hidden = !music.capabilities.playPause;
+  elements.musicNextButton.hidden = !music.capabilities.next;
+  elements.musicPlayButton.disabled = !music.running || music.phase !== "ready" || !music.capabilities.playPause;
+  elements.musicNextButton.disabled = !music.running || music.phase !== "ready" || !music.capabilities.next;
   elements.musicPlayButton.setAttribute("aria-pressed", String(music.playing));
   elements.musicPlayButton.setAttribute("aria-label", music.playing ? "暂停音乐" : "播放音乐");
   elements.musicPlayButton.innerHTML = music.playing
@@ -555,6 +646,9 @@ function clearMusicRuntime() {
   state.music.pollTimer = null;
   Object.assign(state.music, {
     inFlight: false,
+    authorization: "unknown",
+    mode: selectedMusicProvider().mode,
+    capabilities: defaultMusicCapabilities(selectedMusicProvider().mode),
     phase: "idle",
     running: false,
     playing: false,
@@ -572,30 +666,34 @@ async function refreshMusicStatus({ schedule = true, allowHidden = false } = {})
     state.music.inFlight
   ) return;
   const generation = state.music.generation;
+  const provider = state.music.provider;
   state.music.inFlight = true;
-  const reply = await requestNativeWidget("music", "status");
-  if (generation !== state.music.generation || !state.homeWidgets.music) return;
+  const reply = await requestMusicWidget("status");
+  if (generation !== state.music.generation || provider !== state.music.provider || !state.homeWidgets.music) return;
   state.music.inFlight = false;
   if (reply.ok) {
+    applyMusicCapabilities(reply.data);
     Object.assign(state.music, {
       authorization: reply.data?.authorization || state.music.authorization,
-      phase: "ready",
+      phase: state.music.mode === "full" ? "ready" : "limited",
       running: Boolean(reply.data?.running),
-      playing: Boolean(reply.data?.playing),
-      title: String(reply.data?.title || "").slice(0, 160),
-      artist: String(reply.data?.artist || "").slice(0, 160),
+      playing: state.music.capabilities.playPause && Boolean(reply.data?.playing),
+      title: state.music.capabilities.nowPlaying ? String(reply.data?.title || "").slice(0, 160) : "",
+      artist: state.music.capabilities.nowPlaying ? String(reply.data?.artist || "").slice(0, 160) : "",
     });
   } else {
     state.music.phase = reply.code === "denied"
       ? "denied"
-      : (reply.code === "needsPermission" ? "permission" : (reply.code === "unsupported" ? "unavailable" : "timeout"));
+      : (reply.code === "needsPermission"
+        ? "permission"
+        : (reply.code === "appMissing" ? "missing" : (reply.code === "unsupported" ? "unavailable" : "timeout")));
     if (reply.code === "denied") state.music.authorization = "denied";
     Object.assign(state.music, { running: false, playing: false, title: "", artist: "" });
   }
   renderMusicWidget();
   clearTimeout(state.music.pollTimer);
-  if (schedule && state.homeWidgets.music && !document.hidden && !["permission", "denied", "unavailable"].includes(state.music.phase)) {
-    state.music.pollTimer = setTimeout(refreshMusicStatus, 6000);
+  if (schedule && state.homeWidgets.music && !document.hidden && !["permission", "denied", "unavailable", "missing"].includes(state.music.phase)) {
+    state.music.pollTimer = setTimeout(refreshMusicStatus, state.music.mode === "full" ? 6000 : 15000);
   }
 }
 
@@ -615,25 +713,47 @@ async function authorizeMusicWidget() {
   state.music.pollTimer = null;
   state.music.inFlight = false;
   const generation = state.music.generation;
+  const providerId = state.music.provider;
+  const provider = selectedMusicProvider();
   state.music.phase = "requesting";
   renderMusicWidget();
-  const openReply = await requestNativeWidget("music", "openApp");
-  if (generation !== state.music.generation) return false;
+  const openReply = await requestMusicWidget("openApp");
+  if (generation !== state.music.generation || providerId !== state.music.provider) return false;
   if (!openReply.ok) {
-    state.music.phase = "timeout";
+    state.music.phase = openReply.code === "appMissing" ? "missing" : "timeout";
     renderMusicWidget();
-    showToast("无法打开 macOS 音乐");
+    showToast(openReply.code === "appMissing" ? `这台 Mac 尚未安装${provider.name}` : `无法打开${provider.name}`);
     return false;
+  }
+  applyMusicCapabilities(openReply.data);
+
+  if (state.music.mode !== "full") {
+    if (!persistHomeWidgets({ ...state.homeWidgets, music: true })) return false;
+    Object.assign(state.music, {
+      authorization: "notNeeded",
+      phase: "limited",
+      running: true,
+      playing: false,
+      title: "",
+      artist: "",
+    });
+    renderHomeWidgets();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    if (generation === state.music.generation && providerId === state.music.provider) {
+      await refreshMusicStatus({ schedule: true, allowHidden: true });
+    }
+    showToast(`${provider.name}已接入；播放请在播放器内控制`);
+    return true;
   }
 
   let reply = { ok: false, code: "notRunning", data: {} };
   for (const waitMs of [350, 600, 900, 1200]) {
     await new Promise((resolve) => setTimeout(resolve, waitMs));
-    if (generation !== state.music.generation) return false;
-    reply = await requestNativeWidget("music", "authorize", { timeoutMs: 120_000 });
+    if (generation !== state.music.generation || providerId !== state.music.provider) return false;
+    reply = await requestMusicWidget("authorize", { timeoutMs: 120_000 });
     if (reply.ok || reply.code !== "notRunning") break;
   }
-  if (generation !== state.music.generation) return false;
+  if (generation !== state.music.generation || providerId !== state.music.provider) return false;
   if (!reply.ok) {
     state.music.phase = reply.code === "denied" ? "denied" : "timeout";
     state.music.authorization = reply.code === "denied" ? "denied" : "unknown";
@@ -641,8 +761,9 @@ async function authorizeMusicWidget() {
     showToast(reply.code === "denied" ? "没有获得音乐自动化权限" : "暂时无法连接音乐");
     return false;
   }
+  applyMusicCapabilities(reply.data);
   Object.assign(state.music, {
-    authorization: "authorized",
+    authorization: reply.data?.authorization || "authorized",
     running: Boolean(reply.data?.running),
     playing: Boolean(reply.data?.playing),
     title: String(reply.data?.title || "").slice(0, 160),
@@ -661,10 +782,17 @@ async function authorizeMusicWidget() {
 
 async function performMusicAction(action) {
   if (!state.homeWidgets.music) return;
-  const reply = await requestNativeWidget("music", action);
+  if (action !== "openApp" && !state.music.capabilities[action === "playPause" ? "playPause" : "next"]) {
+    showToast(`请在${selectedMusicProvider().name}内控制播放`);
+    return;
+  }
+  const reply = await requestMusicWidget(action);
   if (!reply.ok) {
-    showToast(reply.code === "denied" ? "请在系统设置中允许音乐自动化" : "音乐暂时没有回应");
-    state.music.phase = reply.code === "denied" ? "denied" : "timeout";
+    const provider = selectedMusicProvider();
+    showToast(reply.code === "denied"
+      ? `请在系统设置中允许日叶控制${provider.name}`
+      : (reply.code === "appMissing" ? `这台 Mac 尚未安装${provider.name}` : `${provider.name}暂时没有回应`));
+    state.music.phase = reply.code === "denied" ? "denied" : (reply.code === "appMissing" ? "missing" : "timeout");
     renderMusicWidget();
     return;
   }
@@ -735,9 +863,26 @@ function renderWidgetSettings() {
     button.hidden = !enabled;
   });
   const supported = Boolean(nativeWidgetHandler()?.postMessage);
+  const provider = selectedMusicProvider();
+  const providerInputs = $$('[name="music-provider"]');
+  providerInputs.forEach((input) => {
+    input.checked = input.value === state.music.provider;
+    input.disabled = state.homeWidgets.music || state.music.authorizing;
+  });
+  updateTextContent(elements.musicSettingDescription, provider.description);
   elements.musicPermissionDetail.textContent = supported
-    ? "开启时 macOS 会询问“自动化”权限；关闭后立即停止读取当前曲目。"
+    ? provider.permission
     : "当前为网页版本；音乐联动仅在独立 macOS 版可用。";
+  const musicEnableButton = $('[data-widget-enable="music"]');
+  if (musicEnableButton) {
+    musicEnableButton.textContent = provider.mode === "full" ? "允许并开启" : "打开并开启";
+    musicEnableButton.setAttribute("aria-label", `${musicEnableButton.textContent}“${provider.name}”音乐陪伴小组件`);
+  }
+  elements.musicSettingsFootnote.textContent = state.homeWidgets.music
+    ? `当前使用${provider.name}；关闭音乐陪伴后可切换播放器。`
+    : (provider.mode === "full"
+      ? "自动化权限可随时在“系统设置 → 隐私与安全性 → 自动化”中修改。"
+      : "此模式只打开你选择的播放器，不读取曲名，也不发送播放指令。");
 }
 
 function renderHomeWidgets() {
@@ -782,6 +927,9 @@ function disableHomeWidget(id) {
 
 function initializeHomeWidgets() {
   state.homeWidgets = normalizeHomeWidgets(journalStore.getPreference(HOME_WIDGETS_KEY, {}));
+  state.music.provider = normalizeMusicProvider(journalStore.getPreference(MUSIC_PROVIDER_KEY, "appleMusic"));
+  state.music.mode = selectedMusicProvider().mode;
+  state.music.capabilities = defaultMusicCapabilities(state.music.mode);
   state.music.phase = nativeWidgetHandler()?.postMessage ? "idle" : "unavailable";
   renderHomeWidgets();
 }
@@ -1949,7 +2097,7 @@ function renderLayout() {
     state.homeWidgets.music &&
     !state.music.pollTimer &&
     !state.music.inFlight &&
-    !["permission", "denied", "unavailable"].includes(state.music.phase)
+    !["permission", "denied", "unavailable", "missing"].includes(state.music.phase)
   ) {
     refreshMusicStatus();
   } else if (state.view !== "home") {
@@ -2603,6 +2751,16 @@ function bindEvents() {
     requestAnimationFrame(() => $("#widget-settings-title")?.focus());
   });
   elements.widgetSettingsDialog.addEventListener("close", () => elements.widgetSettingsButton.focus());
+  $$('[name="music-provider"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      if (!input.checked) return;
+      if (selectMusicProvider(input.value)) {
+        showToast(`已选择${selectedMusicProvider().name}`);
+      } else {
+        renderWidgetSettings();
+      }
+    });
+  });
   $$('[data-widget-enable]').forEach((button) => {
     button.addEventListener("click", async () => {
       const id = button.dataset.widgetEnable;
@@ -3073,10 +3231,15 @@ window.dayleafTesting = {
       widgetStartVisible: !elements.homeWidgetStart.hidden,
       widgetEndVisible: !elements.homeWidgetEnd.hidden,
       music: {
+        provider: state.music.provider,
+        mode: state.music.mode,
+        capabilities: { ...state.music.capabilities },
         phase: state.music.phase,
         running: state.music.running,
         playing: state.music.playing,
         title: state.music.title,
+        playButtonHidden: elements.musicPlayButton.hidden,
+        nextButtonHidden: elements.musicNextButton.hidden,
       },
       breathing: {
         running: state.breathing.running,
@@ -3097,6 +3260,9 @@ window.dayleafTesting = {
   },
   async setHomeWidget(id, enabled) {
     return enabled ? enableHomeWidget(id) : disableHomeWidget(id);
+  },
+  setMusicProvider(provider) {
+    return selectMusicProvider(provider);
   },
   async performMusicAction(action) {
     await performMusicAction(action);
